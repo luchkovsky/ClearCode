@@ -12,7 +12,6 @@ ClearCopy/          the extension — all work happens here. No tests, no build
 .tools/             build.js, validate.js, test/ fixtures, tools/make-icons.py —
                     everything that develops or verifies the extension but
                     isn't shipped as part of it.
-WebPDF/             READ-ONLY reference: a minified competitor build. Never edit.
 .claude/commands/   /build and /validate
 ```
 
@@ -24,8 +23,6 @@ itself. This split keeps `ClearCopy/` — the thing that actually gets loaded
 unpacked into Chrome — free of anything a reader of the shipped code doesn't
 need: no `test/` fixtures, no Python icon-generation script, no test runner.
 
-`WebPDF/` is a decompiled third-party extension kept only to study its
-algorithms. It is not our code, is not shipped, and must never be modified.
 
 ## Commands
 
@@ -96,6 +93,7 @@ page ──▶ extract.js ──▶ { html, faithfulHtml, metadata, images }
 | `src/render.js` | Paper geometry, themes, fonts, stylesheet generation. |
 | `src/export.js` | Picks the engine per document type; CDP with print fallback. |
 | `src/collection.js` | Capture-as-you-browse store + merge into one document. |
+| `src/debug.js` | Buffered `debugLog` — see note below on why console.log alone isn't enough. |
 | `background.js` | Service worker; the only place `chrome.debugger` is used. |
 | `preview.js` | Preview controller; extraction, live re-render, export. |
 
@@ -375,9 +373,29 @@ once because the fixture was too easy, once because an SVG check ran against the
 Markdown, which never contains raw HTML. Assert PDF-side defects on `html`,
 Markdown-side defects on `md`.
 
+## Debugging inside injected frames
+
+`console.log` from code injected via `chrome.scripting.executeScript` does not
+reliably surface in any DevTools context — confirmed repeatedly across nested
+iframes, service-worker targets, and context switches. `src/debug.js`'s
+`debugLog(tag, ...args)` instead buffers onto `window.__clearCopyDebugLog`,
+gated behind `window.__clearCopyDebug`, so the caller can read it back off the
+injection's *return value* — the one channel that is actually reliable.
+
+`preview.js` exposes three dev-console commands built on this, kept in the
+codebase permanently rather than stripped after each debugging session:
+- `clearCopyDebugFrames()` — census of every frame (word count, element count,
+  readyState, forms/video/nested-iframe presence, SVG-slider control counts).
+- `clearCopyDebugNavLinks()` — reports `discoverCourseLessonLinks` candidates,
+  by class-based and shape-based ("Lesson N", "Next", "Continue") detection.
+- `clearCopyDebugExtract(frameId, options)` — runs a real extraction against
+  one frame (or all) with `window.__clearCopyDebug = true` and a 20-second
+  client-side timeout, printing each frame's buffered `debugLog`.
+
 ## Conventions
 
-- No build step, framework, or dependencies beyond Node for the two scripts.
+- No build step, framework, or dependencies beyond Node for `.tools/build.js`
+  and `.tools/validate.js`.
 - Comments explain *why*, not what. Existing comments mark real hazards.
 - Match surrounding style: ES modules in `src/`, 2-space indent, single quotes.
 
