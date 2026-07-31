@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Articulate background fill fixture</title>
+</head>
+<body>
+
+<article>
+  <h1>Securing Gateway Runtime</h1>
+  <p>This slide has a full-canvas decorative background fill, the same shape Articulate Storyline draws behind every slide.</p>
+
+  <!-- Reproduces the real Kong Academy slide background: a large SVG that is
+       purely a gradient rect + inner-shadow filter, no <image>, no real
+       <text>. Large enough to pass the plain size check, but carries no
+       visual information. -->
+  <svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 720 540"
+       data-commandset-id="0" data-accepts="events"
+       data-reactid=".0.0.3.2.0.1.0:$_player=16czjVyR0lky=15uOlLz9erFj.0.0.$0"
+       width="720" height="540">
+    <g data-reactid=".0.0.3.2.0.1.0:$_player=16czjVyR0lky=15uOlLz9erFj.0.0.$0.$0">
+      <defs>
+        <linearGradient id="bgGrad">
+          <stop offset="0%" stop-color="#99C6F3"></stop>
+          <stop offset="100%" stop-color="#BBD9F7"></stop>
+        </linearGradient>
+        <filter id="innerShadow" filterUnits="userSpaceOnUse" x="-90" y="-90" width="900" height="720">
+          <feGaussianBlur stdDeviation="14,14"></feGaussianBlur>
+        </filter>
+      </defs>
+      <path fill="url(#bgGrad)" d="M0,0 L720,0 720,540 0,540Z"></path>
+    </g>
+  </svg>
+
+  <p>Real content genuinely worth reading follows the decorative background above.</p>
+
+  <!-- A genuine large SVG diagram, with real text, must NOT be stripped by
+       the same rule — this is what the size check exists to protect. -->
+  <svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 400 300" width="400" height="300">
+    <rect width="400" height="300" fill="#eee"></rect>
+    <text x="20" y="40" font-size="18">Rate Limiting Architecture Diagram</text>
+  </svg>
+
+  <p>Closing paragraph after the real diagram.</p>
+</article>
+
+</body>
+</html>

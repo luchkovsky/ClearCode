@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- The tab title and og:title are LMS chrome labels naming the page TYPE,
+     not the lesson. Both must lose to the lesson's own heading. -->
+<title>Theory Lesson</title>
+<meta property="og:title" content="Theory Lesson">
+</head>
+<body>
+
+<!-- Outer LMS chrome: a thin shell wrapping everything. Its own text is short,
+     but it contains nav icons that must not become document content. -->
+<div class="lesson-shell">
+  <span class="lesson-type">Theory Lesson</span>
+  <button class="save-exit">Save and exit</button>
+
+  <nav class="top-nav">
+    <a href="/home" aria-label="Home">
+      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 12l9-9 9 9M5 10v10h14V10"/>
+      </svg>
+      Home
+    </a>
+    <button aria-label="Search">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+      </svg>
+    </button>
+  </nav>
+
+  <!-- Link-heavy course navigation. Deliberately verbose so it competes with
+       the lesson body on raw text length. -->
+  <aside class="course-sidebar">
+    <h2>Securing Kong Gateway Runtime</h2>
+    <p>100% COMPLETE</p>
+    <ul>
+      <li><a href="/1">Introduction to the course and its objectives</a></li>
+      <li><a href="/2">Securing Kong Gateway Runtime in production</a></li>
+      <li><a href="/3">Rate Limiting strategies and configuration</a></li>
+      <li><a href="/4">Authentication mechanisms and plugin setup</a></li>
+      <li><a href="/5">JWT Authentication Plugin configuration guide</a></li>
+      <li><a href="/6">mTLS Plugin setup and certificate handling</a></li>
+      <li><a href="/7">Secrets Management with vault integrations</a></li>
+      <li><a href="/8">Hardening the Kong Data Plane for production</a></li>
+    </ul>
+  </aside>
+
+  <!-- The real lesson content lives deep inside the shell, split across
+       sibling blocks with no single wrapper that scores well on its own. -->
+  <div class="scroll-region"><div class="page-body"><div class="content-inner">
+    <p class="lesson-counter">Lesson 1 of 8</p>
+    <h1 class="lesson-title">Introduction</h1>
+    <p class="lesson-author">Melissa Huffman</p>
+
+    <section class="lesson-block">
+      <img src="https://example.com/kong-academy-logo.png" alt="Kong Academy" width="400" height="400">
+      <h2>Overview</h2>
+      <p>This course provides a comprehensive overview of Securing Kong Gateway Runtime, focusing on authentication, rate limiting, and secrets management. It emphasized the use of Kong Gateway and its plugins to enhance API security and manage traffic effectively.</p>
+    </section>
+
+    <!-- A decorative section divider INSIDE the lesson body. With no intrinsic
+         size an inline SVG expands to fill the column and swamps the page. -->
+    <div class="section-divider">
+      <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><path d="M12 8v8"/>
+      </svg>
+    </div>
+
+    <section class="lesson-block">
+      <h2>Course Agenda</h2>
+      <ol>
+        <li>Securing API Services</li>
+        <li>Rate Limiting</li>
+        <li>Authentication</li>
+        <li>JWT Authentication Plugin</li>
+        <li>mTLS Plugin</li>
+        <li>Secrets Management</li>
+        <li>Hardening the Kong Data Plane</li>
+      </ol>
+    </section>
+
+    <section class="lesson-block">
+      <h2>Learning Objectives</h2>
+      <p>Upon completion of this lesson, you should be able to:</p>
+      <ol>
+        <li>Understand how to <strong>secure the data plane</strong> and APIs on Kong.</li>
+        <li>Deploy and configure the <strong>rate-limiting plugin.</strong></li>
+        <li>Configure Authentication with the <strong>JWT</strong> and <strong>Mutual TLS plugins</strong>.</li>
+        <li>Identify some general Kong data plane <strong>hardening measures</strong>.</li>
+      </ol>
+    </section>
+  </div></div></div>
+</div>
+
+</body>
+</html>

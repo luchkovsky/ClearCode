@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Loading… | Academy</title>
+<style>
+  body { margin: 0; font-family: system-ui; }
+  .app-header { background: #003459; color: #fff; padding: 12px 20px; }
+  .course-nav { width: 280px; float: left; background: #f4f4f4; padding: 16px; }
+  /* Only the current segment is shown; the rest is real lesson content that a
+     naive extractor silently drops. */
+  lup-show-page-segment { display: none; }
+  lup-show-page-segment.is-current { display: block; }
+</style>
+</head>
+<body>
+
+<header class="app-header">
+  <span>Academy</span>
+  <button class="exit-btn">Exit Course</button>
+</header>
+
+<!-- Link-heavy sidebar: a scorer that ignores link density gets pulled here. -->
+<nav class="course-nav">
+  <h3>Modules</h3>
+  <ul>
+    <li><a href="/1">Introduction to API gateways and why they matter</a></li>
+    <li><a href="/2">Installing Kong Gateway on Docker and Kubernetes</a></li>
+    <li><a href="/3">Services and Routes configuration in depth</a></li>
+    <li><a href="/4">Plugins, authentication and rate limiting basics</a></li>
+  </ul>
+</nav>
+
+<!-- Real LearnUpon-style structure: lesson content sits directly inside custom
+     elements, with no wrapper <div> for a generic scorer to latch onto. -->
+<lup-show-course-page>
+  <div id="module-view-wrapper">
+
+    <lup-show-page-segment class="is-current">
+      <h1>Services and Routes</h1>
+      <p>In Kong Gateway a Service is an abstraction of an upstream application, and each Service may have one or more Routes attached to it for matching incoming client requests.</p>
+      <h2>Creating a Service</h2>
+      <p>Use the Admin API to register an upstream application as a Service so the gateway knows where to forward requests once a Route has matched them successfully.</p>
+      <pre><code class="language-bash">curl -X POST http://localhost:8001/services --data name=example</code></pre>
+      <ul>
+        <li>Routes match on paths and hosts</li>
+        <li>Each Route belongs to one Service</li>
+      </ul>
+      <table>
+        <thead><tr><th>Field</th><th>Description</th></tr></thead>
+        <tbody><tr><td>paths</td><td>Path prefixes that match</td></tr></tbody>
+      </table>
+    </lup-show-page-segment>
+
+    <lup-show-page-segment>
+      <h2>Verifying the Configuration</h2>
+      <p>Send a request through the proxy port to confirm the gateway forwards it to the upstream application correctly and returns the expected response body to the caller.</p>
+      <p>If the request fails, check that the Route paths match the request and that the Service URL points at a host reachable from inside the gateway container itself.</p>
+    </lup-show-page-segment>
+
+    <lup-show-page-segment>
+      <h2>Troubleshooting Common Errors</h2>
+      <p>A 404 from the proxy port usually means no Route matched the request, while a 502 indicates the Route matched but the upstream Service could not be reached at all.</p>
+    </lup-show-page-segment>
+
+  </div>
+</lup-show-course-page>
+
+<footer>
+  <p>Copyright 2024. All rights reserved.</p>
+</footer>
+
+</body>
+</html>

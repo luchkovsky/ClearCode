@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Hardening the Kong Data Plane</title>
+<style>
+  /* The real "visually hidden" accessibility pattern: kept in the a11y tree
+     and in textContent, but invisible on screen via clip + absolute
+     positioning rather than display:none. */
+  .visually-hidden-always {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+</style>
+</head>
+<body>
+
+<article>
+  <h1>Hardening the Kong Data Plane</h1>
+
+  <div class="block-divider">
+    <span class="visually-hidden-always">Numbered divider1</span>
+  </div>
+
+  <p>There are a few other specific security measures to consider in your Kong deployment.</p>
+
+  <div class="visually-hidden-always" aria-live="polite" role="log"></div>
+
+  <p>Hardening the Kong data plane involves implementing health checks, managing mTLS certificates, securing keys, and disabling debug headers.</p>
+</article>
+
+</body>
+</html>

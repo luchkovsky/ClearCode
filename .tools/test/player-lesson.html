@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Rate Limiting</title>
+<style>
+  body { font-family: system-ui; margin: 16px; }
+  .flashcard { display: none; }
+  .flashcard.is-open { display: block; }
+</style>
+</head>
+<body>
+
+<p class="counter">Lesson 3 of 8</p>
+<h1>Rate Limiting</h1>
+<p class="byline">By Melissa Huffman</p>
+
+<h2>What is the Rate Limiting ?</h2>
+<p>Rate limiting in an API is a mechanism that controls how many requests a client (you or your application) can make to the API within a specific time frame—such as per second, per minute, or per day.</p>
+<p>It is used to prevent abuse, reduce load, and ensure fair usage of your services.</p>
+<p>Shared services need to protect themselves from excessive use, so rate limiting on both client and server sides is crucial to avoid impact on availability and cascading failures.</p>
+
+<h2>Why Rate Limiting?</h2>
+<p>Click on the flashcards to learn more about Rate Limiting Use Cases</p>
+
+<!-- Flashcards: one shared panel, clicking a card swaps its text. -->
+<div class="flashcards" role="tablist">
+  <button class="card" role="tab" data-key="ddos">Click to flip Image 1</button>
+  <button class="card" role="tab" data-key="abuse">Click to flip Image 2</button>
+  <button class="card" role="tab" data-key="cost">Click to flip Image 3</button>
+</div>
+<div class="flashcard-panel" id="cardPanel">
+  <p id="cardText">Definition of DDoS: A Distributed Denial of Service (DDoS) attack aims to disrupt the normal traffic of a targeted server, service, or network by overwhelming it with a flood of internet traffic.</p>
+</div>
+
+<h2>Counter Storage Policies</h2>
+<p>Counter storage policies control how Kong stores request counters, and can have ramifications based on the use-case.</p>
+<table>
+  <thead><tr><th>Mode</th><th>Strategy</th><th>Pros</th><th>Cons</th></tr></thead>
+  <tbody>
+    <tr><td>Local</td><td>Counters stored locally in-memory on the node</td><td>Simplest strategy to implement with minimal performance impact.</td><td>Less accurate. Could diverge when scaling.</td></tr>
+    <tr><td>Cluster</td><td>Counters stored in Kong's datastore and shared across nodes</td><td>Accurate and no extra components needed.</td><td>Each request forces read/write.</td></tr>
+  </tbody>
+</table>
+
+<script>
+  const CARDS = {
+    ddos: 'Definition of DDoS: A Distributed Denial of Service (DDoS) attack aims to disrupt the normal traffic of a targeted server, service, or network by overwhelming it with a flood of internet traffic.',
+    abuse: 'Examples of API abuse: A user manipulates the API to make more requests than allowed by creating multiple accounts or using proxies to avoid detection.',
+    cost: 'Cost control: Unbounded request volume drives infrastructure spend, so limits keep usage predictable and budgets under control.',
+  };
+  document.querySelectorAll('.card').forEach((card) => {
+    card.addEventListener('click', () => {
+      document.getElementById('cardText').textContent = CARDS[card.dataset.key];
+    });
+  });
+</script>
+
+
+<h2>How does Rate Limit Plugin work?</h2>
+<p>Click on 'Start' button to understand the working of Rate limiting Plugin</p>
+<div class="stepper">
+  <span class="step-counter" id="counter">1 of 6</span>
+  <div class="step-panel" id="stepPanel"><p id="stepText">Introduction</p></div>
+  <button id="startBtn">START</button>
+  <button id="nextBtn" aria-label="Next">&gt;</button>
+</div>
+
+<h2>Implementation Considerations</h2>
+<p>Click on the Start button, then the (&gt;) to see things to consider for successful implementation.</p>
+<div class="stepper">
+  <span class="step-counter" id="counter2">1 of 4</span>
+  <div class="step-panel" id="stepPanel2"><p id="stepText2">Consideration one: choose a counter storage policy that matches your accuracy needs.</p></div>
+  <button id="nextBtn2" aria-label="Next">&gt;</button>
+</div>
+
+<script>
+  const STEPS = [
+    'Introduction',
+    'Step 2: the client sends a request to the gateway proxy port.',
+    'Step 3: the plugin increments the counter for that consumer.',
+    'Step 4: the counter is compared against the configured limit.',
+    'Step 5: requests over the limit receive a 429 response.',
+    'Step 6: counters reset at the end of the configured window.',
+  ];
+  let i = 0;
+  function advance() {
+    if (i < STEPS.length - 1) i++;
+    document.getElementById('stepText').textContent = STEPS[i];
+    document.getElementById('counter').textContent = (i + 1) + ' of 6';
+  }
+  // START reveals the sequence at step 1; the arrow advances it. This is how
+  // real course steppers behave — Start does not consume a step.
+  document.getElementById('startBtn').addEventListener('click', () => {
+    document.getElementById('stepText').textContent = STEPS[0];
+    document.getElementById('counter').textContent = '1 of 6';
+  });
+  document.getElementById('nextBtn').addEventListener('click', advance);
+
+  const CONSID = [
+    'Consideration one: choose a counter storage policy that matches your accuracy needs.',
+    'Consideration two: size the window against expected burst traffic patterns.',
+    'Consideration three: decide the behaviour when the datastore is unreachable.',
+    'Consideration four: communicate limits to consumers via response headers.',
+  ];
+  let j = 0;
+  document.getElementById('nextBtn2').addEventListener('click', () => {
+    if (j < CONSID.length - 1) j++;
+    document.getElementById('stepText2').textContent = CONSID[j];
+    document.getElementById('counter2').textContent = (j + 1) + ' of 4';
+  });
+</script>
+
+</body>
+</html>

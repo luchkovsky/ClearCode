@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>How does Rate Limit Plugin work?</title>
+<style>
+  body { margin: 0; font-family: system-ui; }
+  .stage { background: #f1f1f1; padding: 40px 24px; }
+  .panel { background: #fff; max-width: 700px; margin: 0 auto; padding: 28px 32px; position: relative; }
+  .badge { background: #0a86b0; color: #fff; padding: 8px 18px; font-weight: 700; display: inline-block; }
+  .arrow {
+    position: absolute; top: 50%; width: 44px; height: 44px; border-radius: 50%;
+    background: #111; border: 0; cursor: pointer;
+  }
+  .arrow.prev { left: -70px; }
+  .arrow.next { right: -70px; }
+  .arrow svg { stroke: #fff; }
+  /* Numbered pagination, as in the real widget: 1 2 3 4 ✓ */
+  .pager { text-align: center; margin-top: 18px; }
+  .pager button {
+    border: 0; background: none; font: inherit; font-size: 15px;
+    width: 34px; height: 34px; border-radius: 50%; cursor: pointer;
+  }
+  
+  .progress-dots { list-style: none; display: flex; gap: 8px; justify-content: center; padding: 0; }
+  .progress-dots li { width: 10px; height: 10px; border-radius: 50%; background: #bbb; }
+</style>
+</head>
+<body>
+
+<h1>How does Rate Limit Plugin work?</h1>
+
+<div class="stage">
+  <div class="panel" id="panel">
+    <span class="badge" id="badge">Step 1</span>
+    <h2 id="stepTitle">Request counting</h2>
+    <p id="stepBody">Each client is tracked based on an configured <strong>limit_by</strong> identifier like consumer id, service id, IP address etc. The API records how many calls you've made within a set interval (e.g., you've made 50 calls in the last 60 seconds).</p>
+
+    <!-- Icon-only arrows: NO text content at all, only an SVG. -->
+    <button class="arrow prev" id="prev" aria-label="Previous">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-width="3"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <button class="arrow next" id="next" aria-label="Next">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-width="3"><path d="M9 18l6-6-6-6"/></svg>
+    </button>
+  </div>
+
+  <!-- Numbered pagination: one control per step. -->
+  <div class="pager" id="dots">
+    <button>1</button>
+    <button>2</button>
+    <button>3</button>
+    <button>4</button>
+  </div>
+
+  <!-- Progress bullets whose numbers come from CSS counters, so the <li>
+       elements carry no text at all. Left in, these export as bare "- ". -->
+  <ul class="progress-dots">
+    <li></li><li></li><li></li><li></li>
+  </ul>
+</div>
+
+<h2>After the walkthrough</h2>
+<p>Rate limiting protects upstream services from bursts of traffic that would otherwise exhaust their capacity.</p>
+
+<script>
+  const STEPS = [
+    ['Request counting', "Each client is tracked based on an configured limit_by identifier like consumer id, service id, IP address etc. The API records how many calls you've made within a set interval (e.g., you've made 50 calls in the last 60 seconds)."],
+    ['Limit comparison', 'The running count is compared against the configured limit for that window, such as one hundred requests per minute per consumer.'],
+    ['Decision and headers', 'If the consumer is under the limit the request is proxied upstream, and rate limit headers are added to the response so clients can self-regulate.'],
+    ['Rejection and reset', 'Once the limit is exceeded the gateway returns HTTP 429 until the window rolls over and the counter resets to zero.'],
+  ];
+
+  let i = 0;
+  function render() {
+    document.getElementById('badge').textContent = 'Step ' + (i + 1);
+    document.getElementById('stepTitle').textContent = STEPS[i][0];
+    document.getElementById('stepBody').textContent = STEPS[i][1];
+    document.querySelectorAll('#dots button').forEach((b, n) => {
+      b.style.fontWeight = n === i ? '700' : '400';
+    });
+  }
+  document.getElementById('next').addEventListener('click', () => { i = Math.min(i + 1, STEPS.length - 1); render(); });
+  document.getElementById('prev').addEventListener('click', () => { i = Math.max(i - 1, 0); render(); });
+  document.querySelectorAll('#dots button').forEach((b, n) => {
+    b.addEventListener('click', () => { i = n; render(); });
+  });
+</script>
+
+</body>
+</html>

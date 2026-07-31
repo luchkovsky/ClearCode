@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>(KGLL-205) Securing Services on Kong Gateway - Theory Lesson | Kong Academy</title>
+<style>
+  /* The real AngularJS ng-hide rule. */
+  .ng-hide { display: none !important; }
+</style>
+</head>
+<body>
+
+<!-- Reproduces the REAL failure reported against education.konghq.com: the
+     learner has not clicked Launch yet, so the lesson genuinely does not
+     exist anywhere in the DOM. There is no iframe, no cross-origin frame, no
+     hidden segment holding the content — it has simply not been created. -->
+<div id="module-view-wrapper">
+
+  <lup-show-page-segment class="ng-isolate-scope ng-hide">
+    <div class="ng-scope segments-merged">
+      <h1>Theory Lesson</h1>
+    </div>
+  </lup-show-page-segment>
+
+  <lup-show-course-page class="ng-isolate-scope">
+    <div class="course-progression-redesign__landing-page">
+      <header class="exam-redesign__title">
+        <span>Theory Lesson</span>
+      </header>
+      <section id="scorm-content-section">
+        <img class="blank-state-img" alt="" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
+        <button ng-click="EnrollmentHelper.launchCourse(scormObj)">Launch</button>
+      </section>
+    </div>
+  </lup-show-course-page>
+
+</div>
+
+</body>
+</html>

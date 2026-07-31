@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Real LearnUpon title format: course ref + page TYPE + portal name. -->
+<title>(KGLL-205) Securing Services on Kong Gateway - Theory Lesson | Kong Academy</title>
+</head>
+<body class="course-progression-redesign">
+
+<div class="course-progression-redesign__wrapper">
+  <div class="overlay"></div>
+
+  <div class="main-content-wrapper">
+    <spinner name="luSpinner-col12"></spinner>
+
+    <section id="main-content">
+      <lua-course-player id="lua-course-player">
+        <div class="course-progression-redesign__full-height">
+          <main class="course-progression-redesign__main">
+            <div class="course-progression-redesign__module-view" id="module-view-wrapper">
+              <!-- Empty until the framework renders into them. -->
+              <lup-show-page-segment></lup-show-page-segment>
+              <lup-show-course-page></lup-show-course-page>
+            </div>
+          </main>
+        </div>
+      </lua-course-player>
+
+      <!-- Static shell machinery present in the served HTML. Its text must
+           never reach the document. -->
+      <div class="scorm-overlay scorm-container">
+        <div class="scorm-launch-window" id="launch_scorm_window_wrap">
+          <header>
+            <p class="ellipsis scorm-launch-window-title" id="scorm-content-title"></p>
+            <luds-button id="scorm_close_button">Save and exit</luds-button>
+          </header>
+          <div class="scorm-info-message shadow">
+            <p>You must click here to correctly close/save your progress when you have finished viewing or completed your module.</p>
+            <button id="close-scorm-notice">Got it!</button>
+          </div>
+          <section id="scorm-content" class="scorm-content"></section>
+        </div>
+      </div>
+
+      <div class="document-overlay">
+        <div class="document-launch-window" id="larger_document_window">
+          <header>
+            <p class="fs-h5 pull-left">{{ helper.showMessage('lup.components.document') }}</p>
+          </header>
+          <section id="document_content" class="document-content">
+            <iframe src="about:blank" id="larger_document_iframe">
+              {{ helper.showMessage('components.your_browser_does_not_support_iframes') }}
+            </iframe>
+          </section>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+  // The shell first shows a placeholder, then the framework renders the lesson
+  // ~600ms later. Extracting before this point captures nothing.
+  const segment = document.querySelector('lup-show-page-segment');
+  segment.innerHTML = '<p class="no-content-message">This page has no content</p>';
+
+  setTimeout(() => {
+    segment.innerHTML = `
+      <p class="lesson-counter">Lesson 1 of 8</p>
+      <h1 class="lesson-title">Introduction</h1>
+      <p class="lesson-author">Melissa Huffman</p>
+
+      <h2>Overview</h2>
+      <p>This course provides a comprehensive overview of Securing Kong Gateway Runtime, focusing on authentication, rate limiting, and secrets management. It emphasized the use of Kong Gateway and its plugins to enhance API security and manage traffic effectively.</p>
+
+      <h2>Course Agenda</h2>
+      <ol>
+        <li>Securing API Services</li>
+        <li>Rate Limiting</li>
+        <li>Authentication</li>
+        <li>JWT Authentication Plugin</li>
+        <li>mTLS Plugin</li>
+        <li>Secrets Management</li>
+        <li>Hardening the Kong Data Plane</li>
+      </ol>
+
+      <h2>Learning Objectives</h2>
+      <p>Upon completion of this lesson, you should be able to:</p>
+      <ol>
+        <li>Understand how to <strong>secure the data plane</strong> and APIs on Kong.</li>
+        <li>Deploy and configure the <strong>rate-limiting plugin.</strong></li>
+        <li>Configure Authentication with the <strong>JWT</strong> and <strong>Mutual TLS plugins</strong>.</li>
+        <li>Identify some general Kong data plane <strong>hardening measures</strong>.</li>
+      </ol>`;
+  }, 600);
+</script>
+
+<script src="../../ClearCopy/src/extractor.bundle.js"></script>
+<script>
+  // Extract the instant the bundle loads — before the 600ms render. This is the
+  // race that made a live course page export an empty shell.
+  window.__autoExtract = window.__clearCopyExtract({ keepImages: true, onlySignificantImages: true })
+    .then(c => ({ words: c.wordCount, title: c.metadata.title,
+                  md: window.__clearCopyToMarkdown(c), html: c.html }));
+</script>
+</body>
+</html>

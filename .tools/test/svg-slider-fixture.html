@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Securing API</title>
+<style>
+  body { margin: 0; font-family: system-ui; }
+  /* Reproduces the real shape reported against an Articulate Storyline course
+     player: everything drawn as SVG, terms are role="button" shapes with an
+     aria-label, and clicking one reveals a hidden sibling "Frame" containing
+     the definition as further SVG text. There is no HTML tab/accordion markup
+     at all — data-model-abs-id is the only fingerprint distinguishing this
+     from an ordinary icon button. */
+  .hidden { display: none; }
+  .slide-object { display: inline-block; width: 140px; height: 60px; margin: 4px; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div id="presentation">
+  <div class="slide-object" aria-label="Process of verifying the identity of a client or user trying to access an API." data-model-abs-id="_player.p1.s1.Text0">
+    <svg><text>Process of verifying the identity of a client or user trying to access an API.</text></svg>
+  </div>
+
+  <div class="slide-object slideobject-maskable" role="button" aria-label="Bot Detection" data-model-abs-id="_player.p1.s1.Sliders.Slider1.Rib">
+    <svg><text>Bot Detection</text></svg>
+  </div>
+  <div class="slide-object" data-model-abs-id="_player.p1.s1.Sliders.Slider1.Frame"></div>
+
+  <div class="slide-object slideobject-maskable" role="button" aria-label="Data encryption" data-model-abs-id="_player.p1.s1.Sliders.Slider2.Rib">
+    <svg><text>Data encryption</text></svg>
+  </div>
+  <div class="slide-object" data-model-abs-id="_player.p1.s1.Sliders.Slider2.Frame"></div>
+
+  <div class="slide-object slideobject-maskable" role="button" aria-label="IP Restriction" data-model-abs-id="_player.p1.s1.Sliders.Slider3.Rib">
+    <svg><text>IP Restriction</text></svg>
+  </div>
+  <div class="slide-object" data-model-abs-id="_player.p1.s1.Sliders.Slider3.Frame"></div>
+</div>
+
+<script>
+  // The real Articulate player does not keep a hidden pre-rendered definition
+  // in the DOM at all — it draws the SVG text into the Frame at click time.
+  // Modeling it that way here means the generic "unhide display:none content"
+  // pass (which always runs, Article or Book) has nothing to reveal; only a
+  // real click populates the Frame, so this fixture actually exercises the
+  // slider harvester rather than passing for an unrelated reason.
+  const DEFINITIONS = {
+    Slider1: 'Process of identifying and mitigating automated bot traffic that interacts with your API.',
+    Slider2: 'Encoding data so that only authorised parties can read it, both in transit and at rest.',
+    Slider3: 'Allowing or denying access to your API based on the client IP address or range.',
+  };
+  document.querySelectorAll('[data-model-abs-id$=".Rib"]').forEach((rib) => {
+    rib.addEventListener('click', () => {
+      const absId = rib.getAttribute('data-model-abs-id');
+      const sliderKey = absId.match(/Sliders\.(Slider\d+)\.Rib$/)[1];
+      const frame = document.querySelector(`[data-model-abs-id="_player.p1.s1.Sliders.${sliderKey}.Frame"]`);
+      if (frame) frame.innerHTML = `<svg><text>${DEFINITIONS[sliderKey]}</text></svg>`;
+    });
+  });
+</script>
+
+</body>
+</html>

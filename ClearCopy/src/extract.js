@@ -1,0 +1,2321 @@
+// Shared extraction core: materialize the page, then reduce it to a clean structure.
+// Everything downstream (Reader/Faithful x Article/Book) consumes this output.
+
+import { debugLog } from './debug.js';
+
+const UNLIKELY = /-ad-|ai2html|banner|breadcrumbs|combx|comment|community|cover-wrap|disqus|extra|footer|gdpr|header|legends|menu|related|remark|replies|rss|shoutbox|sidebar|skyscraper|social|sponsor|supplemental|ad-break|agegate|pagination|pager|popup|yom-remote/i;
+const MAYBE_CANDIDATE = /and|article|body|column|content|main|shadow/i;
+const POSITIVE = /article|body|content|entry|hentry|h-entry|main|page|pagination|post|text|blog|story/i;
+const NEGATIVE = /-ad-|hidden|^hid$| hid$| hid |^hid |banner|combx|comment|com-|contact|footer|gdpr|masthead|media|meta|outbrain|promo|related|scroll|share|shoutbox|sidebar|skyscraper|sponsor|shopping|tags|widget/i;
+const BYLINE = /byline|author|dateline|writtenby|p-author/i;
+
+// Advertising, tracking and interruption widgets. Unlike the generic boilerplate
+// heuristics these are never article content, so they are removed outright and
+// also barred from winning the content-root contest.
+const AD_PATTERNS = /(^|[-_\s])(ad|ads|advert|advertisement|adslot|adunit|adbox|adwrapper|adcontainer|banner)([-_\s]|$)|adsbygoogle|googlesyndication|doubleclick|div-gpt-ad|dfp-|taboola|outbrain|zergnet|revcontent|mgid|sponsored|sponsorship|promoted|promo-box|native-ad|partner-content|affiliate|newsletter-signup|subscribe-box|paywall|cookie-consent|cookie-banner|consent-manager|onetrust|interstitial|popup-overlay|modal-backdrop/i;
+
+// Ad iframes are identified by src, since their class names are often opaque.
+const AD_FRAME_SRC = /doubleclick|googlesyndication|googleadservices|adnxs|amazon-adsystem|taboola|outbrain|criteo|pubmatic|rubiconproject|smartadserver|adform|teads|sharethrough/i;
+
+const VIEWPORT_UNIT = /[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:dvh|svh|lvh|vh|dvw|svw|lvw|vw|vmin|vmax)\b/i;
+
+// Buttons we must never synthetically click: navigating away or mutating user state
+// mid-extraction loses the page we are trying to capture.
+const DESTRUCTIVE_ACTION = /exit|save|close|cancel|submit|leave|logout|sign\s*out|log\s*in|sign\s*in|delete|remove|buy|purchase|checkout|pay|subscribe|next|prev|previous|back|quiz|finish|complete/i;
+const EXPAND_INTENT = /read\s*more|continue\s*reading|show\s*more|show\s*all|expand|full\s*story|unfold|display\s*all|load\s*more|view\s*full|see\s*more/i;
+
+// ---------------------------------------------------------------------------
+// Style manager: every mutation is recorded so the live page can be restored.
+// ---------------------------------------------------------------------------
+
+export class StyleManager {
+  constructor() {
+    this.inline = [];
+    this.injected = [];
+  }
+
+  setInline(el, prop, value) {
+    this.inline.push([el, prop, el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)]);
+    el.style.setProperty(prop, value, 'important');
+  }
+
+  setAttr(el, name, value) {
+    this.inline.push([el, '__attr__' + name, el.getAttribute(name), null]);
+    if (value === null) el.removeAttribute(name);
+    else el.setAttribute(name, value);
+  }
+
+  injectStyleTag(id, css, doc = document) {
+    const tag = doc.createElement('style');
+    tag.id = id;
+    tag.textContent = css;
+    (doc.head || doc.documentElement).appendChild(tag);
+    this.injected.push(tag);
+    return tag;
+  }
+
+  restore() {
+    for (let i = this.inline.length - 1; i >= 0; i--) {
+      const [el, prop, prev, priority] = this.inline[i];
+      if (prop.startsWith('__attr__')) {
+        const name = prop.slice(8);
+        if (prev === null) el.removeAttribute(name);
+        else el.setAttribute(name, prev);
+      } else if (prev) {
+        el.style.setProperty(prop, prev, priority || '');
+      } else {
+        el.style.removeProperty(prop);
+      }
+    }
+    this.inline.length = 0;
+    this.injected.forEach((t) => t.remove());
+    this.injected.length = 0;
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// Document traversal (same-origin frames + shadow roots)
+// ---------------------------------------------------------------------------
+
+export function collectDocuments(root = document, blockedFrames = []) {
+  const docs = [root];
+  const seen = new Set();
+
+  const walk = (doc) => {
+    let frames;
+    try {
+      frames = doc.querySelectorAll('iframe, frame');
+    } catch {
+      return;
+    }
+    frames.forEach((frame) => {
+      if (seen.has(frame)) return;
+      seen.add(frame);
+      let inner = null;
+      try {
+        inner = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document);
+      } catch {
+        inner = null; // cross-origin
+      }
+      if (inner && !docs.includes(inner)) {
+        docs.push(inner);
+        walk(inner);
+        return;
+      }
+      // Unreachable frame: record it so the caller can explain the gap instead
+      // of silently exporting a page with the lesson missing.
+      const rect = frame.getBoundingClientRect();
+      if (rect.width > 200 && rect.height > 200) {
+        blockedFrames.push({
+          src: frame.getAttribute('src') || '',
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        });
+      }
+    });
+  };
+
+  walk(root);
+  return docs;
+}
+
+function* deepElements(root) {
+  const stack = [root];
+  while (stack.length) {
+    const node = stack.pop();
+    let children;
+    try {
+      children = node.querySelectorAll('*');
+    } catch {
+      continue;
+    }
+    for (const el of children) {
+      yield el;
+      if (el.shadowRoot) stack.push(el.shadowRoot);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Viewport-unit freezing.
+//
+// Printing resizes the viewport, so any vh/vw-derived length silently reflows
+// and the captured layout stops matching what the user saw. We resolve those
+// properties to their current computed pixel values and pin them inline first.
+// ---------------------------------------------------------------------------
+
+function stripStringsAndUrls(value) {
+  let out = '';
+  let quote = '';
+  let escaped = false;
+  let depth = 0;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (!depth && value.slice(i, i + 4).toLowerCase() === 'url(') { depth = 1; i += 3; continue; }
+    if (depth) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+const usesViewportUnits = (value) => VIEWPORT_UNIT.test(stripStringsAndUrls(value));
+
+function sheetsFor(root) {
+  const own = root instanceof Document
+    ? Array.from(root.styleSheets)
+    : Array.from(root.querySelectorAll('style')).map((s) => s.sheet).filter(Boolean);
+  return [...own, ...Array.from(root.adoptedStyleSheets || [])];
+}
+
+function collectViewportRule(rule, root, found) {
+  if (rule instanceof CSSStyleRule) {
+    let matches;
+    try {
+      matches = root.querySelectorAll(rule.selectorText);
+    } catch {
+      return;
+    }
+    const props = [];
+    for (const prop of rule.style) {
+      if (prop.startsWith('--')) continue;
+      if (usesViewportUnits(rule.style.getPropertyValue(prop))) props.push(prop);
+    }
+    if (!props.length) return;
+    matches.forEach((el) => {
+      if (!(el instanceof HTMLElement)) return;
+      const set = found.get(el) || new Set();
+      props.forEach((p) => set.add(p));
+      found.set(el, set);
+    });
+    return;
+  }
+  if (rule instanceof CSSImportRule) {
+    if (rule.styleSheet) collectViewportSheet(rule.styleSheet, root, found);
+    return;
+  }
+  if (rule instanceof CSSMediaRule) {
+    if (window.matchMedia(rule.conditionText).matches) {
+      Array.from(rule.cssRules).forEach((r) => collectViewportRule(r, root, found));
+    }
+    return;
+  }
+  if (rule instanceof CSSSupportsRule) {
+    if (CSS.supports(rule.conditionText)) {
+      Array.from(rule.cssRules).forEach((r) => collectViewportRule(r, root, found));
+    }
+    return;
+  }
+  if (rule.constructor.name !== 'CSSContainerRule' && 'cssRules' in rule) {
+    Array.from(rule.cssRules).forEach((r) => collectViewportRule(r, root, found));
+  }
+}
+
+function collectViewportSheet(sheet, root, found) {
+  if (sheet.disabled) return;
+  if (sheet.media.mediaText && !window.matchMedia(sheet.media.mediaText).matches) return;
+  try {
+    Array.from(sheet.cssRules).forEach((rule) => collectViewportRule(rule, root, found));
+  } catch (err) {
+    if (!(err instanceof DOMException && err.name === 'SecurityError')) throw err;
+  }
+}
+
+function collectViewportRoot(root, found) {
+  sheetsFor(root).forEach((sheet) => collectViewportSheet(sheet, root, found));
+  root.querySelectorAll('[style]').forEach((el) => {
+    const props = [];
+    for (const prop of el.style) {
+      if (prop.startsWith('--')) continue;
+      if (usesViewportUnits(el.style.getPropertyValue(prop))) props.push(prop);
+    }
+    if (props.length) {
+      const set = found.get(el) || new Set();
+      props.forEach((p) => set.add(p));
+      found.set(el, set);
+    }
+  });
+  root.querySelectorAll('*').forEach((el) => {
+    if (el.shadowRoot) collectViewportRoot(el.shadowRoot, found);
+  });
+}
+
+export function freezeViewportUnits(styles, doc = document) {
+  const found = new Map();
+  collectViewportRoot(doc, found);
+  found.forEach((props, el) => {
+    const computed = window.getComputedStyle(el);
+    props.forEach((prop) => {
+      const value = computed.getPropertyValue(prop);
+      if (value) styles.setInline(el, prop, value);
+    });
+  });
+  return found.size;
+}
+
+// ---------------------------------------------------------------------------
+// Reveal hidden content
+// ---------------------------------------------------------------------------
+
+function isUnsafeToClick(el) {
+  if (!el) return true;
+  if (el.closest?.('header, nav, [role="banner"], [role="navigation"], form, .navbar, .toolbar, .site-header')) {
+    return true;
+  }
+  const label = (el.innerText || el.textContent || el.getAttribute?.('aria-label') || '').trim();
+  const meta = `${el.className || ''} ${el.id || ''}`;
+  if (DESTRUCTIVE_ACTION.test(label) || DESTRUCTIVE_ACTION.test(meta)) return true;
+  if (el.tagName === 'A' && el.getAttribute('href') && !el.getAttribute('href').startsWith('#')) return true;
+  return false;
+}
+
+// Two different jobs live here, and they are gated differently:
+//
+//   `expand: true`  — open things the reader could open: <details>, accordions,
+//                     ARIA-collapsed regions, inert tab panels. Book only.
+//   always          — undo styling that makes content *unreadable* rather than
+//                     merely collapsed: line clamps, fade masks, scroll locks,
+//                     and display:none on lesson containers. Without this the
+//                     page cannot be read at all, in either mode.
+export function revealHiddenContent(styles, docs = collectDocuments(), { expand = true } = {}) {
+  let revealed = 0;
+
+  docs.forEach((doc) => {
+    if (expand) {
+      // <details> first: cheap, safe, and often wraps the rest.
+      doc.querySelectorAll('details:not([open])').forEach((d) => {
+        styles.setAttr(d, 'open', '');
+        revealed++;
+      });
+
+      // Expand-intent triggers, but only ones that clearly mean "show more".
+      doc.querySelectorAll('button, [role="button"], a[href^="#"], summary, span, div').forEach((el) => {
+        const label = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
+        if (!label || label.length > 40) return;
+        if (!EXPAND_INTENT.test(label)) return;
+        if (isUnsafeToClick(el)) return;
+        try {
+          el.click();
+          revealed++;
+        } catch {}
+      });
+
+      // Collapsed ARIA regions: flip the state and unhide what they control.
+      doc.querySelectorAll('[aria-expanded="false"]').forEach((el) => {
+        if (isUnsafeToClick(el)) return;
+        styles.setAttr(el, 'aria-expanded', 'true');
+        const id = el.getAttribute('aria-controls');
+        const target = id && doc.getElementById(id);
+        if (target) {
+          styles.setAttr(target, 'hidden', null);
+          styles.setInline(target, 'display', 'block');
+          styles.setInline(target, 'max-height', 'none');
+          revealed++;
+        }
+      });
+
+      // Inert tab panels hold real content; make them all visible at once.
+      doc.querySelectorAll('[role="tabpanel"], .tab-pane, .tab-content').forEach((panel) => {
+        if (!(panel.textContent || '').trim()) return;
+        styles.setAttr(panel, 'hidden', null);
+        styles.setInline(panel, 'display', 'block');
+        styles.setInline(panel, 'visibility', 'visible');
+        styles.setInline(panel, 'opacity', '1');
+        revealed++;
+      });
+    }
+
+    // Carousel/slider frameworks (Rise 360's own carousel among them) hide
+    // inactive slides with the `hidden` and `inert` HTML attributes rather
+    // than display:none, and their content already sits fully in the DOM —
+    // no click is needed to make the text exist, only to unhide it. Detected
+    // by shape (siblings that share hidden+inert, next to a visible sibling
+    // of the same class), not by a specific library's class name, so this
+    // is not tied to Rise 360 specifically.
+    //
+    // Ungated (Article too): unlike a tab/stepper, which needs a simulated
+    // click to make its other panels' text exist at all, every slide here is
+    // already fully present — a reader would just click through them on the
+    // real page at no cost. That makes it "the page as it stands" rather
+    // than Book-only expansion, the same reasoning that keeps the
+    // display:none sweep below unconditional.
+    doc.querySelectorAll('[hidden][inert]').forEach((el) => {
+      const siblings = Array.from(el.parentElement?.children || []);
+      const sameShape = siblings.filter((s) => s.className === el.className);
+      if (sameShape.length < 2) return;
+      const hasVisibleSibling = sameShape.some((s) => !s.hasAttribute('hidden'));
+      if (!hasVisibleSibling) return;
+      if ((el.textContent || '').trim().length < 40) return;
+      styles.setAttr(el, 'hidden', null);
+      styles.setAttr(el, 'inert', null);
+      revealed++;
+    });
+
+    // Content hidden by plain display:none. Learning platforms show one lesson
+    // segment at a time this way, so the rest of the document is real content
+    // the export must include, regardless of Article/Book.
+    //
+    // Conservative on purpose: only blocks holding substantial prose, never
+    // menus, dialogs or template stamps, or we would drag in page furniture.
+    //
+    // Excludes carousel-slide-shaped siblings (>=2 elements sharing a class,
+    // one of them visible): those are Book-only content, handled above by the
+    // hidden+inert pass, gated on `expand`. Without this exclusion Article
+    // would reveal every slide too, since the `hidden` attribute's default
+    // UA-stylesheet styling is indistinguishable from a plain display:none
+    // lesson segment by computed style alone.
+    doc.querySelectorAll('*').forEach((el) => {
+      const style = window.getComputedStyle(el);
+      if (style.display !== 'none') return;
+
+      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text.length < 80) return;
+
+      const meta = `${el.getAttribute('class') || ''} ${el.id || ''}`;
+      if (UNLIKELY.test(meta) && !MAYBE_CANDIDATE.test(meta)) return;
+      if (AD_PATTERNS.test(meta)) return;
+      if (/menu|dropdown|dialog|modal|tooltip|popover|autocomplete|typeahead|template|placeholder/i.test(meta)) return;
+      if (el.closest('nav, header, footer, [role="dialog"], [role="menu"], template, select')) return;
+
+      // Needs real structure, not just a blob of concatenated link text.
+      if (el.querySelectorAll('p, li, h1, h2, h3, h4, pre, table, img').length < 1) return;
+
+      if (el.hasAttribute('inert')) {
+        const siblings = Array.from(el.parentElement?.children || []);
+        const sameShape = siblings.filter((s) => s.className === el.className);
+        if (sameShape.length >= 2 && sameShape.some((s) => !s.hasAttribute('hidden'))) return;
+      }
+
+      styles.setInline(el, 'display', 'block');
+      styles.setInline(el, 'visibility', 'visible');
+      styles.setInline(el, 'opacity', '1');
+      revealed++;
+    });
+
+    // Clamps, fades and scroll-locks that truncate otherwise-present text.
+    for (const el of deepElements(doc)) {
+      const computed = window.getComputedStyle(el);
+      if (computed.webkitLineClamp && computed.webkitLineClamp !== 'none') {
+        styles.setInline(el, '-webkit-line-clamp', 'none');
+        revealed++;
+      }
+      if (computed.maskImage !== 'none' || computed.webkitMaskImage !== 'none') {
+        styles.setInline(el, 'mask-image', 'none');
+        styles.setInline(el, '-webkit-mask-image', 'none');
+      }
+      // A short max-height over tall content is a collapse, not a design choice.
+      const maxH = parseFloat(computed.maxHeight);
+      if (maxH && el.scrollHeight > maxH + 40) {
+        styles.setInline(el, 'max-height', 'none');
+        styles.setInline(el, 'overflow', 'visible');
+        revealed++;
+      }
+      if (/auto|scroll/.test(computed.overflowY) && el.scrollHeight > el.clientHeight + 40) {
+        styles.setInline(el, 'overflow', 'visible');
+        styles.setInline(el, 'height', 'auto');
+        revealed++;
+      }
+    }
+  });
+
+  return revealed;
+}
+
+// ---------------------------------------------------------------------------
+// Wait for client-rendered content
+//
+// Single-page apps (AngularJS, React, Vue) ship an HTML shell whose content
+// containers are empty custom elements, then fill them in from JS. Extracting
+// immediately captures the shell — which on a course page means the static
+// "no content" placeholders and nothing else.
+//
+// There is no universal "ready" signal, so we watch for the DOM to stop growing:
+// poll the amount of rendered prose and return once it has been stable for a
+// couple of checks, or when the ceiling is reached.
+// ---------------------------------------------------------------------------
+
+// Placeholders a shell shows before its data arrives. Their presence means the
+// app has not finished rendering, whatever the text length says.
+const SHELL_PLACEHOLDER = /this (page|module|section) has no content|no content available|loading\b|please wait/i;
+
+function renderedProse(doc = document) {
+  let total = 0;
+  doc.body?.querySelectorAll('p, li, td, blockquote, pre, h1, h2, h3, h4').forEach((node) => {
+    if (node.closest('nav, header, footer, aside')) return;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden') return;
+    total += (node.textContent || '').replace(/\s+/g, ' ').trim().length;
+  });
+  return total;
+}
+
+export async function waitForContent({ timeout = 6000, stableChecks = 3, interval = 150 } = {}) {
+  const deadline = Date.now() + timeout;
+  let lastLength = -1;
+  let stable = 0;
+
+  while (Date.now() < deadline) {
+    const length = renderedProse();
+    const placeholderShowing = SHELL_PLACEHOLDER.test(document.body?.innerText || '');
+
+    // Growing, or still showing a placeholder: keep waiting.
+    if (length !== lastLength || (placeholderShowing && length < 400)) {
+      stable = 0;
+      lastLength = length;
+    } else {
+      stable++;
+      // Enough consecutive identical measurements: the app has settled.
+      if (stable >= stableChecks && length > 0) return { settled: true, length };
+    }
+
+    await sleep(interval);
+  }
+
+  return { settled: false, length: lastLength };
+}
+
+// ---------------------------------------------------------------------------
+// Copy-protection
+//
+// Course and article pages often discourage copying with CSS (user-select:none),
+// event handlers (oncopy/onselectstart returning false), or a transparent
+// element laid over the text. None of these hide the content — it is already in
+// the DOM the browser rendered for the reader — but they do interfere with
+// extraction and can leave an invisible overlay sitting on top of the article.
+//
+// We neutralise them on the working copy only; the live page is restored
+// afterwards by StyleManager like every other mutation.
+// ---------------------------------------------------------------------------
+
+const BLOCKED_EVENTS = ['copy', 'cut', 'selectstart', 'contextmenu', 'dragstart', 'beforecopy'];
+
+export function neutraliseCopyProtection(styles, doc = document) {
+  let relaxed = 0;
+
+  // 1. CSS selection locks.
+  styles.injectStyleTag('clearcopy-select', `
+    *, *::before, *::after {
+      -webkit-user-select: text !important;
+      -moz-user-select: text !important;
+      user-select: text !important;
+      -webkit-touch-callout: default !important;
+    }
+  `, doc);
+
+  // 2. Inline handlers that cancel selection/copy.
+  BLOCKED_EVENTS.forEach((name) => {
+    const attr = `on${name}`;
+    doc.querySelectorAll(`[${attr}]`).forEach((el) => {
+      styles.setAttr(el, attr, null);
+      relaxed++;
+    });
+    // Body/document-level handlers assigned as properties.
+    [doc, doc.body, doc.documentElement].forEach((target) => {
+      if (target && typeof target[attr] === 'function') {
+        target[attr] = null;
+        relaxed++;
+      }
+    });
+  });
+
+  // 3. Transparent overlays parked on top of the text. Only elements that cover
+  //    a meaningful area and carry no content of their own qualify — a real
+  //    sticky header or dialog must not be touched.
+  const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+  doc.querySelectorAll('div, span, section, a').forEach((el) => {
+    const style = window.getComputedStyle(el);
+    if (style.position !== 'absolute' && style.position !== 'fixed') return;
+    if (style.pointerEvents === 'none') return; // already harmless
+
+    const rect = el.getBoundingClientRect();
+    if (rect.width * rect.height < viewportArea * 0.25) return;
+
+    const transparent = style.backgroundColor === 'rgba(0, 0, 0, 0)' || style.opacity === '0';
+    const empty = !(el.textContent || '').trim() && !el.querySelector('img, video, svg, canvas');
+    if (!transparent || !empty) return;
+
+    // Let clicks and selection reach the content underneath.
+    styles.setInline(el, 'pointer-events', 'none');
+    styles.setInline(el, 'display', 'none');
+    relaxed++;
+  });
+
+  return relaxed;
+}
+
+// ---------------------------------------------------------------------------
+// Interactive widgets (tabs, steppers, accordions, carousels)
+//
+// Course authoring tools render these as one reused panel: clicking a tab
+// *replaces* the panel text rather than unhiding a sibling. Revealing hidden
+// nodes cannot recover the other panels, so we click each control in turn and
+// harvest what appears, then splice the collected sections into the document.
+// ---------------------------------------------------------------------------
+
+const TAB_CONTROL_SELECTOR = [
+  '[role="tab"]',
+  '.tab', '.tabs__tab', '.tab-title', '.tab-label', '.tab-button', '.tabs-card__button',
+  '.accordion-header', '.accordion-trigger', '.accordion__title',
+  '[data-tab]', '[data-tab-index]', '[data-slide-index]', '[data-step]', '[data-index]',
+  '.carousel-indicator', '.stepper__step', '.step-indicator',
+  '.dot', '.dots button', '.pagination button', '.pagination a',
+  '.swiper-pagination-bullet', '.slick-dots button', '[aria-current]',
+].join(',');
+
+// Numbered pagination ("1 2 3 4") is the most reliable stepper signal there is:
+// one control per step, in order. Such controls carry no useful class name on
+// many sites, so they are recognised by shape instead — a short numeric label
+// among siblings that are also numbers.
+const NUMERIC_LABEL = /^\s*\d{1,2}\s*$/;
+
+function numericPaginationGroups(doc) {
+  const groups = new Map();
+
+  doc.querySelectorAll('button, a, li, span[role="button"], div[role="button"]').forEach((el) => {
+    if (!NUMERIC_LABEL.test(el.textContent || '')) return;
+    if (el.closest('nav, header, footer')) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 8 || rect.height < 8) return;
+
+    const parent = el.parentElement;
+    if (!parent) return;
+    if (!groups.has(parent)) groups.set(parent, []);
+    groups.get(parent).push(el);
+  });
+
+  // Two or more numeric siblings, and they must read 1..n to be pagination
+  // rather than a table of figures that happens to sit in one container.
+  return Array.from(groups.values()).filter((group) => {
+    if (group.length < 2) return false;
+    const numbers = group.map((el) => Number((el.textContent || '').trim()));
+    return numbers.every((n, i) => n === i + 1);
+  });
+}
+
+// Text that means "leave", "submit" or "end the session", never "show me
+// this section". Used to filter both widget controls (clicked in place) and
+// course-navigation links (actually navigated to for a whole-course Book
+// capture) — the latter is the higher-stakes case: following a real link
+// can end an enrollment or log the learner out, not just swap a panel.
+const TAB_UNSAFE = /submit|finish|complete|exit|close|cancel|logout|log\s*out|sign\s*out|delete|remove|buy|purchase|checkout|pay|save\s*(and|&)?\s*(exit|close|quit)|quit|end\s*(course|session|lesson)|unenroll|withdraw|drop\s*course/i;
+
+const normalizeSnippet = (s) => (s || '').replace(/\s+/g, ' ').trim();
+
+function visibleTabGroups(doc) {
+  const controls = Array.from(doc.querySelectorAll(TAB_CONTROL_SELECTOR)).filter((el) => {
+    if (TAB_UNSAFE.test(el.textContent || '')) return false;
+    if (el.closest('nav, header, footer, [role="navigation"]')) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 4 && rect.height > 4;
+  });
+
+  // Group controls by their common parent: each group is one widget.
+  const groups = new Map();
+  controls.forEach((el) => {
+    const container = el.closest('[role="tablist"], .tabs, .tab-list, .accordion, .stepper, .carousel')
+      || el.parentElement;
+    if (!container) return;
+    if (!groups.has(container)) groups.set(container, []);
+    groups.get(container).push(el);
+  });
+
+  // A single control is a button, not a tab set.
+  const found = Array.from(groups.values()).filter((g) => g.length >= 2);
+
+  // Numbered pagination detected by shape, for widgets whose dots carry no
+  // recognisable class name. Skip any group already covered above.
+  numericPaginationGroups(doc).forEach((group) => {
+    if (found.some((existing) => existing.some((el) => group.includes(el)))) return;
+    found.push(group);
+  });
+
+  return found;
+}
+
+// The panel holds the text that changes when tabs switch. It is usually an
+// ancestor region, but flashcard and carousel widgets put it in a *sibling*
+// element next to the control strip, so check both.
+function findPanelFor(group, doc) {
+  const explicit = doc.querySelector('[role="tabpanel"]:not([hidden])');
+  if (explicit && normalizeSnippet(explicit.textContent).length > 20) return explicit;
+
+  const labels = group.map((g) => normalizeSnippet(g.textContent)).join(' ');
+  const container = group[0]?.parentElement;
+
+  // Panel as a *cousin* inside the same widget: steppers put the controls and
+  // the panel side by side under one wrapper, so look within before ranging out.
+  if (container) {
+    const inside = Array.from(container.querySelectorAll('div, section, p'))
+      .filter((el) => !group.some((g) => el.contains(g) || el === g))
+      .map((el) => ({ el, len: normalizeSnippet(el.textContent).length }))
+      .filter((c) => c.len > 20)
+      .sort((a, b) => b.len - a.len)[0];
+    if (inside) return inside.el;
+  }
+
+  // Sibling panel: the common shape for flashcards and carousels.
+  let sibling = container?.nextElementSibling;
+  for (let i = 0; sibling && i < 3; i++, sibling = sibling.nextElementSibling) {
+    const text = normalizeSnippet(sibling.textContent);
+    if (text.length > 40 && !group.some((g) => sibling.contains(g))) return sibling;
+  }
+
+  // Otherwise walk up looking for a container that also holds prose.
+  let node = container;
+  for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+    const text = normalizeSnippet(node.textContent);
+    // Meaningfully more text than just the tab labels themselves.
+    if (text.length > labels.length + 60) return node;
+  }
+  return null;
+}
+
+// Sequential steppers: a Start button and a "next" arrow that advance one panel
+// at a time ("1 of 6"). Unlike tabs there is no control per panel, so clicking
+// each control once captures only the first step. These must be clicked
+// repeatedly until the content stops changing.
+const NEXT_CONTROL_SELECTOR = [
+  '[aria-label*="next" i]', '[title*="next" i]', '[data-action="next"]',
+  '.next', '.next-btn', '.next-button', '.carousel-next', '.slick-next',
+  '.stepper__next', '[class*="arrow-right"]', '[class*="chevron-right"]',
+].join(',');
+
+const START_LABEL = /^\s*(start|begin|launch|play|go)\s*$/i;
+const NEXT_LABEL = /^\s*(next|continue|>|›|→|»)\s*$/i;
+
+function findSequentialSteppers(doc) {
+  const found = [];
+  const candidates = Array.from(doc.querySelectorAll(
+    `button, [role="button"], a[href^="#"], ${NEXT_CONTROL_SELECTOR}`));
+
+  // A widget usually offers both Start and Next driving the same panel.
+  // Walking it twice re-enters mid-sequence and loses a step, so prefer the
+  // Next control — it advances from wherever the panel currently sits.
+  const byContainer = new Map();
+
+  for (const control of candidates) {
+    const label = normalizeSnippet(control.textContent);
+    // Icon-only controls have no text at all, so the accessible name and the
+    // title attribute are the only things identifying them.
+    const aria = `${control.getAttribute('aria-label') || ''} ${control.getAttribute('title') || ''}`;
+    const isNext = NEXT_LABEL.test(label) || /\bnext\b|\bforward\b/i.test(aria)
+      || control.matches(NEXT_CONTROL_SELECTOR);
+    const isStart = START_LABEL.test(label) || /^\s*(start|begin)\b/i.test(aria);
+
+    // Never walk backwards — a previous control would re-collect what we have.
+    if (/\bprev(ious)?\b|\bback\b/i.test(aria)) continue;
+    if (!isNext && !isStart) continue;
+    if (TAB_UNSAFE.test(label) || TAB_UNSAFE.test(aria)) continue;
+    if (control.closest('nav, header, footer')) continue;
+
+    const rect = control.getBoundingClientRect();
+    if (rect.width < 4 || rect.height < 4) continue;
+
+    const container = control.parentElement || control;
+    // Keep every control per widget: some steppers only advance once Start has
+    // been pressed, others only have a Next. The caller walks each and keeps
+    // whichever yields more steps.
+    if (!byContainer.has(container)) byContainer.set(container, []);
+    byContainer.get(container).push({ control, isStart });
+  }
+
+  // Start first: a widget gated behind Start produces nothing without it.
+  byContainer.forEach((entries) => {
+    entries.sort((a, b) => Number(b.isStart) - Number(a.isStart));
+    found.push(...entries);
+  });
+  return found;
+}
+
+// Walk a stepper to the end, collecting each panel state.
+async function harvestStepper(entry, doc) {
+  const { control, isStart } = entry;
+
+  // The panel is whatever region changes as we advance.
+  const panel = findPanelFor([control], doc);
+  if (!panel) return null;
+
+  const sections = [];
+  const seen = new Set();
+  const record = () => {
+    const body = normalizeSnippet(panel.textContent);
+    if (!body || body.length < 15) return false;
+    const fingerprint = body.slice(0, 200);
+    if (seen.has(fingerprint)) return false;
+    seen.add(fingerprint);
+    sections.push({ label: '', html: panel.cloneNode(true).innerHTML });
+    return true;
+  };
+
+  record(); // the state before we touch anything
+
+  // Bounded: enough for any realistic stepper, and stops as soon as the
+  // content stops changing.
+  // A Start control both begins the sequence and advances it, so after pressing
+  // it the panel is already on step 2 and any *other* control resumes from
+  // there. Prefer a sibling Next once started, so no step is skipped.
+  const advancer = (isStart && doc)
+    ? (findSequentialSteppers(doc).find((e) => !e.isStart
+        && (e.control.parentElement === control.parentElement))?.control || control)
+    : control;
+
+  const MAX_STEPS = 30;
+  for (let i = 0; i < MAX_STEPS; i++) {
+    const button = (isStart && i === 0) ? control : advancer;
+    try {
+      button.click();
+    } catch {
+      break;
+    }
+    await sleep(160);
+    // The first Start press may only reveal the sequence without changing text.
+    if (!record() && !(isStart && i === 0)) break;
+  }
+
+  return sections.length >= 2 ? { panel, sections } : null;
+}
+
+// Articulate Storyline/Rise course players draw everything as SVG shapes and
+// text (<tspan> with per-glyph coordinates) inside a canvas-like root
+// (data-model-abs-id attributes, ".slideobject-maskable" wrappers), instead of
+// normal HTML prose. Their "sliders" (glossary terms, click-to-reveal facts)
+// are elements with role="button" and an aria-label naming the term; clicking
+// one reveals a sibling panel of further SVG text. There is no tab class or
+// panel convention to match — the accessible name is the only label.
+//
+// The [data-model-abs-id] requirement is load-bearing: it is specific to
+// Articulate's runtime and keeps this from ever matching ordinary carousel or
+// icon-button aria-labels that harvestInteractiveWidgets/findSequentialSteppers
+// already own. Without it this would re-click controls other harvesters have
+// already accounted for, or click unrelated page chrome.
+const MAX_SVG_SLIDERS = 20;
+
+function findSvgSliderControls(doc) {
+  return Array.from(doc.querySelectorAll('[role="button"][aria-label][data-model-abs-id]'))
+    .filter((el) => {
+      const label = (el.getAttribute('aria-label') || '').trim();
+      if (!label || label.length > 80) return false;
+      if (TAB_UNSAFE.test(label)) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 8 && rect.height > 8;
+    })
+    .slice(0, MAX_SVG_SLIDERS);
+}
+
+export async function harvestSvgSliders(styles, doc = document) {
+  const harvested = [];
+  const controls = findSvgSliderControls(doc);
+  debugLog('svgSlider', `doc=${doc.location?.href} controlsFound=${controls.length}`);
+  if (controls.length < 2) return harvested;
+
+  const sections = [];
+  const seen = new Set();
+
+  for (const control of controls) {
+    const label = (control.getAttribute('aria-label') || '').trim();
+    if (!label) continue;
+
+    try {
+      control.click();
+    } catch {
+      continue;
+    }
+    await sleep(160);
+
+    // The panel is whichever ancestor of the control gained meaningfully more
+    // text than the label alone — bounded walk, no re-entrant looping.
+    let panel = null;
+    let node = control.parentElement;
+    for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+      const text = normalizeSnippet(node.textContent);
+      if (text.length > label.length + 20) { panel = node; break; }
+    }
+    if (!panel) {
+      debugLog('svgSlider', `"${label}": no panel found within 6 ancestor levels`);
+      continue;
+    }
+
+    const body = normalizeSnippet(panel.textContent).replace(normalizeSnippet(label), '').trim();
+    if (!body || body.length < 10) {
+      debugLog('svgSlider', `"${label}": panel body too short (${body.length} chars): ${JSON.stringify(body.slice(0, 80))}`);
+      continue;
+    }
+
+    const fingerprint = `${label}::${body.slice(0, 200)}`;
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+
+    sections.push({ label, html: `<p>${body}</p>` });
+  }
+
+  debugLog('svgSlider', `sections harvested=${sections.length} (need >=2 to splice)`);
+  if (sections.length >= 2) {
+    // Splicing needs one real node all sections attach under: the lowest
+    // ancestor shared by every control that was actually clicked.
+    let container = controls[0];
+    for (const control of controls.slice(1)) {
+      while (container && !container.contains(control)) container = container.parentElement;
+    }
+    if (container) harvested.push({ panel: container, sections });
+  }
+  return harvested;
+}
+
+// True when a panel already holds several distinct, substantial children at
+// once — the shape left behind by the hidden+inert carousel reveal pass
+// earlier in the pipeline (see revealHiddenContent). Clicking through such a
+// widget's controls is pointless (every panel already coexists in the DOM)
+// and risky: repeatedly clicking a carousel's numbered dots can re-trigger
+// its own show/hide logic or animations that never settle, for no gain.
+function panelAlreadyExpanded(panel) {
+  const substantialChildren = Array.from(panel.children)
+    .filter((child) => normalizeSnippet(child.textContent).length > 40);
+  return substantialChildren.length >= 2;
+}
+
+export async function harvestInteractiveWidgets(styles, doc = document) {
+  const harvested = [];
+  const groups = visibleTabGroups(doc);
+
+  for (const group of groups) {
+    const panel = findPanelFor(group, doc);
+    if (!panel) continue;
+    if (panelAlreadyExpanded(panel)) continue;
+
+    const sections = [];
+    const seen = new Set();
+    const originallyActive = group.find((el) =>
+      el.getAttribute('aria-selected') === 'true' || /active|current|selected|is-open/.test(el.className || ''));
+
+    for (const control of group) {
+      const label = normalizeSnippet(control.textContent).slice(0, 120);
+      if (!label) continue;
+
+      try {
+        control.click();
+      } catch {
+        continue;
+      }
+      // Let the widget swap its content in. These are local DOM updates, so a
+      // short wait is enough; anything slower is a page we cannot help anyway.
+      await sleep(140);
+
+      // Capture the panel minus the tab controls themselves.
+      const clone = panel.cloneNode(true);
+      group.forEach((c) => {
+        const label2 = normalizeSnippet(c.textContent);
+        clone.querySelectorAll('*').forEach((el) => {
+          if (el.children.length === 0 && normalizeSnippet(el.textContent) === label2) el.remove();
+        });
+      });
+
+      const body = normalizeSnippet(clone.textContent);
+      if (!body || body.length < 15) continue;
+
+      // Identical body means the click did nothing — not a real tab.
+      const fingerprint = body.slice(0, 200);
+      if (seen.has(fingerprint)) continue;
+      seen.add(fingerprint);
+
+      sections.push({ label, html: clone.innerHTML });
+    }
+
+    // Restore whatever was open before we started poking at it.
+    if (originallyActive) {
+      try { originallyActive.click(); } catch {}
+      await sleep(80);
+    }
+
+    // Two or more distinct panels means we genuinely found a tab widget.
+    if (sections.length >= 2) harvested.push({ panel, sections });
+  }
+
+  // Sequential steppers, for panels the tab pass did not already cover.
+  //
+  // A widget commonly has both Start and Next driving one panel, and which one
+  // actually advances it varies. Walk each control and keep whichever collected
+  // the most steps, rather than guessing.
+  const bestByPanel = new Map();
+  for (const entry of findSequentialSteppers(doc)) {
+    if (harvested.some(({ panel }) => panel.contains(entry.control) || panel === entry.control)) continue;
+
+    const target = findPanelFor([entry.control], doc);
+    if (!target) continue;
+    if (harvested.some(({ panel }) => panel === target)) continue;
+
+    let result = null;
+    try {
+      result = await harvestStepper(entry, doc);
+    } catch {}
+    if (!result) continue;
+
+    const incumbent = bestByPanel.get(target);
+    if (!incumbent || result.sections.length > incumbent.sections.length) {
+      bestByPanel.set(target, result);
+    }
+  }
+  bestByPanel.forEach((result) => harvested.push(result));
+
+  return harvested;
+}
+
+// Replace each widget in the clean tree with its sections laid out in order.
+export function spliceHarvestedWidgets(clone, harvested, sourceRoot) {
+  if (!harvested.length) return 0;
+  let spliced = 0;
+
+  for (const { panel, sections } of harvested) {
+    if (!sourceRoot.contains(panel)) continue;
+
+    // Locate the same panel inside the clone by walk position.
+    const liveNodes = [sourceRoot, ...sourceRoot.querySelectorAll('*')];
+    const cloneNodes = [clone, ...clone.querySelectorAll('*')];
+    const index = liveNodes.indexOf(panel);
+    const target = index >= 0 ? cloneNodes[index] : null;
+    if (!target || !clone.contains(target)) continue;
+
+    const doc = clone.ownerDocument;
+    const fragment = doc.createDocumentFragment();
+    for (const section of sections) {
+      // Tabs have labels and become headings; sequential steps do not, and an
+      // empty <h3> would render as a stray blank line.
+      if (section.label) {
+        const heading = doc.createElement('h3');
+        heading.textContent = section.label;
+        fragment.appendChild(heading);
+      }
+
+      const body = doc.createElement('div');
+      body.innerHTML = section.html;
+      fragment.appendChild(body);
+    }
+
+    target.replaceWith(fragment);
+    spliced++;
+  }
+
+  return spliced;
+}
+
+// ---------------------------------------------------------------------------
+// Force lazy content to load: scroll the page in steps, then settle.
+// ---------------------------------------------------------------------------
+
+function contentBottom() {
+  let bottom = 0;
+  document.body.querySelectorAll('*').forEach((el) => {
+    if (!el.offsetWidth && !el.offsetHeight && !el.getClientRects().length) return;
+    const b = el.getBoundingClientRect().bottom + window.scrollY;
+    if (b > bottom) bottom = b;
+  });
+  return Math.max(bottom, document.documentElement.scrollHeight);
+}
+
+async function settleImages(timeout = 3000) {
+  const pending = Array.from(document.images)
+    .filter((img) => !img.complete && img.src)
+    .map((img) => new Promise((res) => {
+      img.addEventListener('load', res, { once: true });
+      img.addEventListener('error', res, { once: true });
+    }));
+  if (!pending.length) return;
+  await Promise.race([Promise.all(pending), sleep(timeout)]);
+}
+
+export async function materializeLazyContent(styles, { onProgress } = {}) {
+  // Eager-load every image up front so scrolling only has to trigger JS loaders.
+  document.querySelectorAll('img').forEach((img) => {
+    if (img.loading === 'lazy') styles.setAttr(img, 'loading', 'eager');
+    const lazy = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy-src');
+    const src = img.getAttribute('src') || '';
+    if (lazy && (!src || src.startsWith('data:image') || /blank|placeholder|spacer/i.test(src))) {
+      styles.setAttr(img, 'src', lazy);
+    }
+    if (img.dataset.srcset && !img.srcset) styles.setAttr(img, 'srcset', img.dataset.srcset);
+  });
+
+  // Same for lazy-loaded iframes: an embedded widget (Articulate Storyline
+  // "scroll animation" blocks among them) never creates its inner document
+  // until the browser actually loads it, and chrome.scripting's allFrames
+  // injection can only reach a frame that exists. Without this, an iframe
+  // that never scrolled into view during the (possibly instant) page load
+  // stays permanently empty — no amount of extraction logic inside it helps
+  // if it was never given a document to run in.
+  document.querySelectorAll('iframe[loading="lazy"]').forEach((frame) => {
+    styles.setAttr(frame, 'loading', 'eager');
+  });
+
+  const origin = window.scrollY;
+  const step = Math.max(1, window.innerHeight - 200);
+  let target = contentBottom();
+
+  for (let y = 0; y < target; y += step) {
+    window.scrollTo(0, y);
+    await sleep(90);
+    onProgress?.(Math.min(0.95, y / Math.max(target, 1)));
+    // Infinite feeds grow as we scroll; re-measure but keep the walk bounded.
+    const grown = contentBottom();
+    if (grown > target && grown < target * 4) target = grown;
+  }
+
+  window.scrollTo(0, target);
+  await sleep(250);
+  await settleImages();
+  // document.fonts.ready has no built-in timeout, and in at least one real
+  // course-player iframe (an Articulate Storyline widget, no <link>/@font-face
+  // of its own to actually finish loading) it never resolved at all — hanging
+  // extractDocument() indefinitely with no error. Race it the same way
+  // settleImages bounds image loads.
+  try {
+    await Promise.race([document.fonts?.ready, sleep(2000)]);
+  } catch {}
+  window.scrollTo(0, origin);
+  await sleep(80);
+  onProgress?.(1);
+}
+
+// ---------------------------------------------------------------------------
+// Readability-style scoring
+// ---------------------------------------------------------------------------
+
+const BLOCK_TAGS = new Set(['DIV', 'SECTION', 'ARTICLE', 'MAIN', 'TD', 'PRE', 'BLOCKQUOTE', 'P', 'LI']);
+
+// Learning platforms (LearnUpon, SCORM players, Docebo, Litmos…) wrap lesson
+// content in custom elements and framework containers that carry no semantic
+// meaning to a generic scorer. Treat them as scoring candidates and give them a
+// boost, or the scorer settles on a smaller inner <div> and loses the rest.
+const LMS_CONTAINER = /^(lup-|scorm-|course-|lesson-|module-|topic-|slide-|unit-)|(^|[-_])(course|lesson|module|topic|segment|slide|courseware|player)([-_]|$)/i;
+
+// Ordered outermost-first: a lesson page holds several segments, and matching
+// an inner one would export only the segment currently on screen.
+const LMS_SELECTORS = [
+  'lup-show-course-page', '#module-view-wrapper', '.course-progression-redesign__main',
+  'lup-course-content', '#scorm-content', '#document_content', '.scorm-content',
+  '.course-content', '.lesson-content', '.module-content', '.topic-content',
+  '[class*="courseware"]', '[data-testid*="lesson"]', '[data-testid*="course"]',
+  'lup-show-page-segment', // last resort: a single segment is better than nothing
+];
+
+// A custom element (contains a hyphen) is a plausible content container.
+// BODY counts too. A framed lesson (SCORM module, embedded reader) is a
+// standalone document whose content sits directly on <body> with no wrapper —
+// without this nothing accumulates a score and the frame looks empty.
+const isCandidateContainer = (el) =>
+  BLOCK_TAGS.has(el.tagName) || el.tagName === 'BODY' || el.tagName.includes('-');
+
+function classWeight(el) {
+  let weight = 0;
+  const meta = `${el.getAttribute?.('class') || ''} ${el.id || ''}`;
+  if (!meta.trim()) return 0;
+  if (NEGATIVE.test(meta)) weight -= 25;
+  if (POSITIVE.test(meta)) weight += 25;
+  if (AD_PATTERNS.test(meta)) weight -= 100; // must never win the contest
+  // Prefer the platform's own lesson container over an arbitrary inner div.
+  if (LMS_CONTAINER.test(meta) || (el.tagName.includes('-') && LMS_CONTAINER.test(el.tagName))) {
+    weight += 40;
+  }
+  return weight;
+}
+
+// True when the node sits inside a learning-platform content container.
+function isInsideLmsContainer(el) {
+  for (let node = el; node && node.nodeType === Node.ELEMENT_NODE; node = node.parentElement) {
+    if (node.tagName.includes('-') && LMS_CONTAINER.test(node.tagName)) return true;
+    const meta = `${node.getAttribute?.('class') || ''} ${node.id || ''}`;
+    if (LMS_CONTAINER.test(meta)) return true;
+  }
+  return false;
+}
+
+// True when the node sits inside an advertising or interruption unit.
+function isAdvertising(el) {
+  for (let node = el; node && node.nodeType === Node.ELEMENT_NODE; node = node.parentElement) {
+    const meta = `${node.getAttribute?.('class') || ''} ${node.id || ''}`;
+    if (AD_PATTERNS.test(meta)) return true;
+    if (node.hasAttribute?.('data-ad-slot') || node.hasAttribute?.('data-ad-client')) return true;
+  }
+  return false;
+}
+
+function linkDensity(el) {
+  const text = (el.textContent || '').trim().length;
+  if (!text) return 0;
+  let linkText = 0;
+  el.querySelectorAll('a').forEach((a) => { linkText += (a.textContent || '').length; });
+  return linkText / text;
+}
+
+function isVisible(el) {
+  const style = window.getComputedStyle(el);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+}
+
+// Score paragraphs, then propagate upward: the winning container is the one whose
+// descendants carry the most prose, discounted by link density and boilerplate class names.
+export function findContentRoot(doc = document) {
+  // Known learning-platform containers win outright when they hold real content.
+  // Defence-in-depth: when the platform wraps lessons in a plain <div> the
+  // generic scorer already finds it, but some platforms nest content directly
+  // in custom elements where scoring settles on a single on-screen segment.
+  let lmsBest = null;
+  let lmsBestChars = 0;
+  for (const selector of LMS_SELECTORS) {
+    let nodes;
+    try {
+      nodes = doc.querySelectorAll(selector);
+    } catch {
+      continue; // selector unsupported in this browser
+    }
+    for (const node of nodes) {
+      const chars = (node.textContent || '').replace(/\s+/g, ' ').trim().length;
+      // A wrapper holding the whole lesson, not a stray label.
+      if (chars < 400) continue;
+      if (node.querySelectorAll('p, li, h1, h2, h3, pre, table').length < 2) continue;
+      // Widest wrapper wins, so multi-segment pages export in full.
+      if (chars > lmsBestChars) {
+        lmsBest = node;
+        lmsBestChars = chars;
+      }
+    }
+    if (lmsBest) break; // this tier matched; don't fall through to inner ones
+  }
+  if (lmsBest) return lmsBest;
+
+  const explicit = doc.querySelector('article, [role="main"], main');
+  const candidates = new Map();
+
+  const paragraphs = Array.from(doc.querySelectorAll('p, pre, td, blockquote, li, h1, h2, h3'));
+  paragraphs.forEach((node) => {
+    const text = (node.textContent || '').trim();
+    if (text.length < 25) return;
+    if (isAdvertising(node)) return; // ad copy must not pull the root toward it
+
+    // Visibility is a weak signal on learning platforms: only the *current*
+    // lesson segment is displayed while the rest of the course page is real
+    // content that is merely collapsed. Score hidden text at a discount rather
+    // than discarding it, so the winning container still spans the whole page.
+    const visible = isVisible(node);
+    const visibilityFactor = visible ? 1 : (isInsideLmsContainer(node) ? 0.75 : 0.25);
+
+    let score = (1 + text.split(/,/).length + Math.min(Math.floor(text.length / 100), 3)) * visibilityFactor;
+
+    // Walk further than Readability's default: LMS markup nests lesson content
+    // several wrappers deep, and stopping at 4 strands the real container.
+    let parent = node.parentElement;
+    let depth = 0;
+    while (parent && depth < 6) {
+      if (isCandidateContainer(parent)) {
+        const divisor = depth === 0 ? 1 : depth === 1 ? 2 : depth * 3;
+        candidates.set(parent, (candidates.get(parent) || 0) + score / divisor);
+      }
+      parent = parent.parentElement;
+      depth++;
+    }
+  });
+
+  let best = null;
+  let bestScore = 0;
+  candidates.forEach((score, el) => {
+    const meta = `${el.getAttribute?.('class') || ''} ${el.id || ''}`;
+    if (UNLIKELY.test(meta) && !MAYBE_CANDIDATE.test(meta)) return;
+    if (AD_PATTERNS.test(meta)) return;
+    const final = (score + classWeight(el)) * (1 - linkDensity(el));
+    if (final > bestScore) {
+      bestScore = final;
+      best = el;
+    }
+  });
+
+  // Prefer a semantic container when it holds essentially the same content.
+  if (explicit && best && explicit.contains(best)) {
+    const explicitLen = (explicit.textContent || '').trim().length;
+    const bestLen = (best.textContent || '').trim().length;
+    if (explicitLen && bestLen / explicitLen > 0.6) return explicit;
+  }
+
+  best = best || explicit || doc.body;
+
+  // Safety net. Scoring can settle on one small block — a lead paragraph, a
+  // single section — and silently drop the rest of the article. Compare against
+  // the page's total prose and climb while an ancestor holds materially more
+  // without dragging in navigation.
+  best = growRootIfTruncated(best, doc);
+
+  return best;
+}
+
+// Total visible prose on the page, used to judge whether a chosen root is
+// suspiciously small. Counts only paragraph-level text, so navigation link
+// soup does not inflate the target.
+function proseLength(el) {
+  if (!el) return 0;
+  let total = 0;
+  el.querySelectorAll('p, li, td, blockquote, pre, h1, h2, h3, h4').forEach((node) => {
+    if (node.closest('nav, header, footer, aside')) return;
+    // An <iframe> contributes no text of its own, so nothing here double-counts
+    // frame content: the frame's document is measured separately.
+    total += (node.textContent || '').replace(/\s+/g, ' ').trim().length;
+  });
+  return total;
+}
+
+function growRootIfTruncated(best, doc) {
+  const pageProse = proseLength(doc.body);
+  if (!pageProse) return best;
+
+  let current = best;
+  let currentProse = proseLength(current);
+
+  // Already holding most of the page: nothing to do.
+  if (currentProse / pageProse >= 0.6) return current;
+
+  for (let parent = current.parentElement, depth = 0;
+       parent && parent !== doc.body && depth < 14;
+       parent = parent.parentElement, depth++) {
+    const parentProse = proseLength(parent);
+    if (parentProse <= currentProse * 1.15) continue; // no real gain
+
+    // Refuse a parent that is mostly links: that is the nav/sidebar shell.
+    if (linkDensity(parent) > 0.5) continue;
+
+    const meta = `${parent.getAttribute?.('class') || ''} ${parent.id || ''}`;
+    if (AD_PATTERNS.test(meta)) continue;
+
+    current = parent;
+    currentProse = parentProse;
+    if (currentProse / pageProse >= 0.6) break;
+  }
+
+  return current;
+}
+
+// ---------------------------------------------------------------------------
+// Metadata
+// ---------------------------------------------------------------------------
+
+function meta(doc, names) {
+  for (const name of names) {
+    const el = doc.querySelector(`meta[property="${name}"], meta[name="${name}"]`);
+    const content = el?.getAttribute('content')?.trim();
+    if (content) return content;
+  }
+  return '';
+}
+
+// Page-type labels that platforms put in <title>/og:title. They name the kind of
+// page, not its subject, so they make useless document titles and filenames.
+const GENERIC_TITLE = /^(theory\s+lesson|lesson|module|course|page|home|dashboard|untitled|loading|document|video|quiz|assessment|activity|content|viewer|player)$/i;
+
+function pickTitle(contentHeading, metaTitle) {
+  if (!contentHeading) return metaTitle;
+  if (!metaTitle) return contentHeading;
+  // A generic shell label never beats a real heading.
+  if (GENERIC_TITLE.test(metaTitle)) return contentHeading;
+  // Metadata that merely restates the heading is fine either way.
+  return contentHeading;
+}
+
+export function extractMetadata(doc = document, root = null) {
+  let jsonLd = {};
+  for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
+    try {
+      const parsed = JSON.parse(script.textContent);
+      const node = Array.isArray(parsed) ? parsed[0] : (parsed['@graph']?.[0] || parsed);
+      if (node && typeof node === 'object') { jsonLd = node; break; }
+    } catch {}
+  }
+
+  // The heading inside the extracted content is the most trustworthy title: on
+  // learning platforms og:title and <title> hold the page *type* ("Theory
+  // Lesson") or the course name, not the lesson the user is reading. Prefer the
+  // content heading, and only fall back to metadata when it is missing or looks
+  // like a generic shell label.
+  const contentHeading = root?.querySelector('h1, h2')?.textContent?.replace(/\s+/g, ' ').trim() || '';
+  const metaTitle =
+    meta(doc, ['og:title', 'twitter:title']) ||
+    (typeof jsonLd.headline === 'string' ? jsonLd.headline : '') ||
+    doc.querySelector('h1')?.textContent?.replace(/\s+/g, ' ').trim() ||
+    doc.title?.replace(/\s+/g, ' ').trim() ||
+    '';
+
+  // Strip a trailing "| Site Name" suffix before comparing.
+  const cleanMeta = metaTitle.replace(/\s*[|–—·]\s*[^|–—·]{2,40}$/, '').trim();
+
+  const title = pickTitle(contentHeading, cleanMeta || metaTitle) || 'Untitled';
+
+  let author =
+    meta(doc, ['author', 'article:author', 'og:article:author']) ||
+    (typeof jsonLd.author === 'string' ? jsonLd.author : jsonLd.author?.name || '');
+  if (!author) {
+    const el = doc.querySelector('[rel="author"], [itemprop="author"], .author, .byline');
+    const text = el?.textContent?.trim();
+    if (text && text.length < 80 && BYLINE.test(`${el.className} ${el.id}`)) {
+      author = text.replace(/^by\s+/i, '');
+    }
+  }
+
+  const rawDate =
+    meta(doc, ['article:published_time', 'og:published_time', 'date']) ||
+    jsonLd.datePublished ||
+    doc.querySelector('time[datetime]')?.getAttribute('datetime') ||
+    '';
+  let date = '';
+  if (rawDate) {
+    const parsed = new Date(rawDate);
+    date = Number.isNaN(parsed.getTime()) ? rawDate : parsed.toLocaleDateString(undefined, {
+      year: 'numeric', month: 'long', day: 'numeric',
+    });
+  }
+
+  return {
+    title,
+    author: author || '',
+    date,
+    siteName: meta(doc, ['og:site_name']) || location.hostname.replace(/^www\./, ''),
+    domain: location.hostname.replace(/^www\./, ''),
+    url: location.href,
+    excerpt: meta(doc, ['og:description', 'description']),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Clean the cloned subtree
+// ---------------------------------------------------------------------------
+
+const STRIP_TAGS = 'script, noscript, style, link, template, iframe, object, embed, form, select, textarea, button, dialog, [aria-modal="true"], ins.adsbygoogle, [class*="adsbygoogle"]';
+
+// Inline SVG is nearly always a UI icon (nav arrows, search, chevrons). Left in,
+// it renders as a full-width line drawing that swamps the page — an icon has no
+// intrinsic size, so it expands to whatever box it lands in. Only keep SVGs
+// large enough on screen to plausibly be a diagram.
+const MIN_SVG_EDGE = 100;
+
+// Off-screen machinery that ships in the served HTML of app shells: modal
+// launchers, viewer overlays, progress banners, unrendered template markup.
+// These carry static text ("Save and exit", "Relaunch", "This page has no
+// content") that is never part of the lesson but survives text-based filtering.
+//
+// Belt and braces: when `waitForContent` succeeds the lesson wins the scoring
+// contest and this machinery falls outside the chosen root anyway. It matters
+// when the wait times out on a slow page and the shell is all there is.
+// Chrome that is never content, whatever it contains.
+const APP_SHELL_SELECTORS = [
+  '.scorm-info-message', '#scorm-content-title',
+  'spinner', '[class*="spinner"]',
+  '[ng-show="show_page_data"]:empty', '[ng-if]:empty', '[ng-switch]:empty',
+  'lu-footer', 'lup-pagination', 'list-header',
+];
+
+// Containers that are pure scaffolding *while empty*, but hold the real lesson
+// once the player fills them. On LearnUpon the "Relaunch" button loads the
+// module into #scorm-content — deleting that unconditionally threw away the
+// entire lesson. Only remove these when they carry no content of their own.
+const LAZY_SHELL_SELECTORS = [
+  '.scorm-overlay', '.scorm-container', '.scorm-launch-window',
+  '#launch_scorm_window_wrap', '#scorm-content',
+  '.document-overlay', '.document-launch-window', '#document_content',
+  '#larger_document_window', '.overlay',
+];
+
+// Enough substance to be worth keeping: real prose, or embedded media.
+function holdsContent(el) {
+  const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+  if (text.length >= 120) return true;
+  return !!el.querySelector('img, video, canvas, svg, iframe, table');
+}
+
+// Angular/Vue interpolation left unrendered ("{{ helper.showMessage(...) }}")
+// means the framework never bound that node — it is template scaffolding.
+const UNRENDERED_BINDING = /\{\{[^}]{2,120}\}\}/;
+
+// Instructions that only make sense while clicking the live page. Once the
+// panels behind a widget are captured and laid out in sequence, "Click to flip"
+// and "Click on the Start button" describe an interaction the reader cannot
+// perform and no longer need.
+const INTERACTION_PROMPT = new RegExp([
+  '^click (on |to |each |any |the )?',
+  '^tap (on |to |each |the )?',
+  '^select (each|the|any) (tab|card|item|option|step)',
+  '^hover (over|on) ',
+  '^drag ',
+  '^press (the |on )?(start|next|play|begin)',
+  '^use the (arrows?|buttons?|controls?) ',
+  '^flip (the )?card',
+  '^swipe ',
+].join('|'), 'i');
+
+// A prompt is short and imperative; a paragraph that merely begins with "Click"
+// but runs on is real prose.
+const isInteractionPrompt = (text) => {
+  const t = (text || '').replace(/\s+/g, ' ').trim();
+  if (!t || t.length > 160) return false;
+  return INTERACTION_PROMPT.test(t);
+};
+
+function stripInteractionPrompts(clone) {
+  let removed = 0;
+  Array.from(clone.querySelectorAll('p, span, div, li, em, i, strong, small, figcaption'))
+    .forEach((el) => {
+      if (!clone.contains(el)) return;
+      if (el.children.length) return; // judge leaves only
+      if (!isInteractionPrompt(el.textContent)) return;
+      (el.closest('p, li, figcaption') || el).remove();
+      removed++;
+    });
+  return removed;
+}
+
+function stripAppShell(clone) {
+  APP_SHELL_SELECTORS.forEach((selector) => {
+    let nodes;
+    try {
+      nodes = clone.querySelectorAll(selector);
+    } catch {
+      return; // selector unsupported here
+    }
+    nodes.forEach((el) => el.remove());
+  });
+
+  // Player containers: scaffolding when empty, the lesson itself when filled.
+  LAZY_SHELL_SELECTORS.forEach((selector) => {
+    let nodes;
+    try {
+      nodes = clone.querySelectorAll(selector);
+    } catch {
+      return;
+    }
+    nodes.forEach((el) => {
+      if (!clone.contains(el)) return;
+      if (!holdsContent(el)) el.remove();
+    });
+  });
+
+  // Leftover template bindings and shell placeholders.
+  Array.from(clone.querySelectorAll('*')).forEach((el) => {
+    if (!clone.contains(el)) return;
+    if (el.children.length) return; // only judge leaves
+    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    if (UNRENDERED_BINDING.test(text) || SHELL_PLACEHOLDER.test(text)) {
+      (el.closest('section, div, p, li') || el).remove();
+    }
+  });
+}
+
+// Articulate Storyline/Rise draws every slide's background as a full-canvas
+// SVG (a gradient-filled rect plus an inner-shadow <filter>, sized to the
+// whole 720x540-style slide) — the same runtime fingerprint the SVG-slider
+// widget uses (data-reactid, data-commandset-id, data-accepts="events"). Its
+// size alone would pass the "large enough to be a real illustration" check
+// below, but it carries no information: no <image>, no <text>/<tspan> with
+// real words, just shapes and filters. Confirmed against a real Kong Academy
+// slide background that otherwise printed as a plain colour rectangle inside
+// the exported PDF.
+const ARTICULATE_CANVAS_MARKER = /data-reactid|data-commandset-id/;
+
+function isArticulateBackgroundFill(svg) {
+  if (!ARTICULATE_CANVAS_MARKER.test(svg.outerHTML.slice(0, 300))) return false;
+  if (svg.querySelector('image')) return false;
+  const hasRealText = Array.from(svg.querySelectorAll('text, tspan'))
+    .some((t) => (t.textContent || '').trim().length > 1);
+  return !hasRealText;
+}
+
+function stripDecorativeSvg(clone, sourceRoot) {
+  const liveNodes = sourceRoot ? [sourceRoot, ...sourceRoot.querySelectorAll('*')] : null;
+  const cloneNodes = [clone, ...clone.querySelectorAll('*')];
+
+  Array.from(clone.querySelectorAll('svg')).forEach((svg) => {
+    let keep = false;
+
+    // Measure the corresponding live node: the clone is detached and has no box.
+    if (liveNodes) {
+      const index = cloneNodes.indexOf(svg);
+      const live = index >= 0 ? liveNodes[index] : null;
+      if (live && live.tagName === 'svg') {
+        const rect = live.getBoundingClientRect();
+        keep = rect.width >= MIN_SVG_EDGE && rect.height >= MIN_SVG_EDGE;
+      }
+    }
+
+    // A titled/labelled SVG is usually a real illustration.
+    if (!keep && (svg.querySelector('title') || svg.getAttribute('aria-label'))) {
+      const w = parseFloat(svg.getAttribute('width')) || 0;
+      const h = parseFloat(svg.getAttribute('height')) || 0;
+      keep = w >= MIN_SVG_EDGE && h >= MIN_SVG_EDGE;
+    }
+
+    // Size overrides nothing here: a full-slide background fill is large by
+    // construction, not because it depicts something.
+    if (keep && isArticulateBackgroundFill(svg)) keep = false;
+
+    if (keep) {
+      // Stop it expanding to fill the column.
+      svg.style.maxWidth = '100%';
+      svg.style.height = 'auto';
+    } else {
+      svg.remove();
+    }
+  });
+}
+
+// Common class names for the "visually hidden" accessibility pattern: text
+// left in the DOM (and so in textContent) purely for screen readers, made
+// invisible on screen via clip/absolute-positioning rather than
+// display:none. A caption like "Numbered divider" or "Slide 3 of 8" is
+// meant to be *announced*, not *read* — it has no place in an exported
+// document, which is a visual medium like the screen it was hidden from.
+const SCREEN_READER_ONLY = /visually-?hidden|sr-only|screen-reader-only|visuallyhidden|a11y-hidden/i;
+
+function stripScreenReaderOnly(clone, sourceRoot) {
+  const liveNodes = sourceRoot ? [sourceRoot, ...sourceRoot.querySelectorAll('*')] : null;
+  const cloneNodes = [clone, ...clone.querySelectorAll('*')];
+
+  Array.from(clone.querySelectorAll('*')).forEach((el) => {
+    const meta = `${el.getAttribute?.('class') || ''} ${el.id || ''}`;
+    if (!SCREEN_READER_ONLY.test(meta)) return;
+    if (!clone.contains(el)) return; // an ancestor match already removed it
+
+    // Confirm against the live node's actual box: a class name alone could be
+    // a false positive on a site that reuses the term for something visible.
+    if (liveNodes) {
+      const index = cloneNodes.indexOf(el);
+      const live = index >= 0 ? liveNodes[index] : null;
+      if (live) {
+        const rect = live.getBoundingClientRect();
+        if (rect.width > 4 && rect.height > 4) return; // genuinely on screen
+      }
+    }
+
+    el.remove();
+  });
+}
+
+// Attributes that reliably mark an ad slot.
+const AD_ATTRS = ['data-ad-slot', 'data-ad-client', 'data-ad-unit', 'data-adunitpath', 'data-google-query-id', 'data-taboola', 'data-outbrain'];
+
+// SVG elements expose className as an SVGAnimatedString, so coerce via the
+// attribute rather than the property.
+const classOf = (el) => el.getAttribute?.('class') || '';
+
+function stripAdvertising(root) {
+  let removed = 0;
+
+  // Attribute-marked slots.
+  AD_ATTRS.forEach((attr) => {
+    root.querySelectorAll(`[${attr}]`).forEach((el) => { el.remove(); removed++; });
+  });
+
+  // Ad-network iframes (before the generic iframe strip, to count them).
+  root.querySelectorAll('iframe[src]').forEach((el) => {
+    if (AD_FRAME_SRC.test(el.getAttribute('src') || '')) { el.remove(); removed++; }
+  });
+
+  // Class/id/role-marked units. Walk a static list: removing during a live
+  // NodeList walk would skip siblings.
+  Array.from(root.querySelectorAll('*')).forEach((el) => {
+    // The tree is detached, so isConnected is always false here — containment
+    // is the only valid check that an earlier removal has not already taken it.
+    if (!root.contains(el)) return;
+
+    const meta = `${classOf(el)} ${el.id || ''}`;
+    const label = el.getAttribute('aria-label') || '';
+    const dataTest = el.getAttribute('data-testid') || '';
+
+    if (AD_PATTERNS.test(meta) || AD_PATTERNS.test(label) || AD_PATTERNS.test(dataTest)) {
+      el.remove();
+      removed++;
+      return;
+    }
+
+    // "Advertisement" / "Sponsored" disclosure labels sit directly on the unit.
+    const own = (el.childElementCount === 0 ? el.textContent || '' : '').trim();
+    if (own.length < 30 && /^(advertisement|sponsored|promoted|paid content|ad)$/i.test(own)) {
+      const unit = el.closest('div, section, aside, li') || el;
+      unit.remove();
+      removed++;
+    }
+  });
+
+  return removed;
+}
+const STRIP_ROLES = '[role="dialog"], [role="alertdialog"], [role="banner"], [role="navigation"], [role="complementary"], [role="search"], [role="toolbar"]';
+
+// Images that carry meaning vs. page furniture. Measured on the *live* element,
+// since a clone has no layout box.
+const IMAGE_JUNK = /sprite|icon|logo|avatar|badge|emoji|pixel|tracker|beacon|spacer|blank|placeholder|1x1|share|social|button|arrow|bullet|separator|divider|thumb(nail)?[-_]?\d*$/i;
+
+// Minimum rendered size for an image to count as content rather than decoration.
+const MIN_IMAGE_EDGE = 120;
+const MIN_IMAGE_AREA = 100 * 100;
+
+// Wrappers that make a content image *look* like chrome. Publishing platforms
+// put article images inside click-to-expand and edit affordances, so a
+// role="button" ancestor alone says nothing about the image's meaning.
+const isRealChrome = (img) => {
+  const chrome = img.closest('nav, header, footer, [role="navigation"], [role="banner"]');
+  if (chrome) return true;
+  const control = img.closest('button, [role="button"]');
+  if (!control) return false;
+  // A control wrapping a *large* image is an expand/edit affordance, not a
+  // toolbar button — judge those on the image itself. An unloaded image
+  // collapses to its alt-text box, so declared dimensions win over the
+  // measured rect until it has actually decoded.
+  const loaded = img.complete && img.naturalWidth > 0;
+  const rect = img.getBoundingClientRect();
+  const declaredW = parseInt(img.getAttribute('width'), 10) || parseFloat(img.style?.width) || 0;
+  const declaredH = parseInt(img.getAttribute('height'), 10) || parseFloat(img.style?.height) || 0;
+  const w = loaded ? (rect.width || declaredW) : (declaredW || rect.width);
+  const h = loaded ? (rect.height || declaredH) : (declaredH || rect.height);
+  return !(w >= MIN_IMAGE_EDGE && h >= MIN_IMAGE_EDGE);
+};
+
+function isSignificantImage(img) {
+  if (img.getAttribute('aria-hidden') === 'true') return false;
+
+  const src = img.currentSrc || img.getAttribute('src') || '';
+  if (!src) return false;
+  if (src.startsWith('data:image/gif')) return false; // near-always a spacer/tracker
+
+  if (isRealChrome(img)) return false;
+
+  const naming = `${src} ${img.className || ''} ${img.id || ''}`;
+  const namedAsJunk = IMAGE_JUNK.test(naming);
+
+  // Explicit dimensions describe intent even when the file never loaded.
+  const attrW = parseInt(img.getAttribute('width'), 10) || 0;
+  const attrH = parseInt(img.getAttribute('height'), 10) || 0;
+  const styleW = parseFloat(img.style?.width) || 0;
+  const styleH = parseFloat(img.style?.height) || 0;
+
+  // A broken or still-loading image collapses to its alt-text box, so its
+  // measured size describes the text, not the picture. Only trust geometry
+  // once the image has actually decoded.
+  const loaded = img.complete && img.naturalWidth > 0;
+  const rect = img.getBoundingClientRect();
+
+  const width = loaded ? (rect.width || img.naturalWidth) : (styleW || attrW || 0);
+  const height = loaded ? (rect.height || img.naturalHeight) : (styleH || attrH || 0);
+  const big = width >= MIN_IMAGE_EDGE && height >= MIN_IMAGE_EDGE;
+
+  // Author intent. A caption or descriptive alt text is a positive statement
+  // that the image carries meaning; platforms often stamp role="presentation"
+  // on genuinely meaningful article images, so those signals override it.
+  // Size alone does not: a large image marked decorative is decorative.
+  const alt = (img.getAttribute('alt') || '').trim();
+  const captioned = !!img.closest('figure')?.querySelector('figcaption');
+  // A junk-sounding filename ("...-logo-...") only disqualifies a *small*
+  // image. Article graphics are routinely named that way, so at content size
+  // the caption/alt statement wins.
+  const vouchedFor = (captioned || alt.length > 8) && (!namedAsJunk || big);
+  const declaredIntent = vouchedFor
+    || (big && !namedAsJunk && img.getAttribute('role') !== 'presentation');
+
+  // Intent outranks geometry: a wide article banner would otherwise be rejected
+  // as a sliver, which is how article hero images went missing.
+  if (declaredIntent) {
+    // Even so, never keep a true sliver — those are rules and spacers.
+    if (width && height) {
+      const ratio = width / height;
+      if (ratio > 12 || ratio < 1 / 12) return false;
+      if (width * height < MIN_IMAGE_AREA) return false;
+    }
+    return true;
+  }
+
+  if (img.getAttribute('role') === 'presentation') return false;
+
+  if (width && height) {
+    const ratio = width / height;
+    if (ratio > 8 || ratio < 0.125) return false;
+    if (!big) return false;
+    if (width * height < MIN_IMAGE_AREA) return false;
+  }
+
+  if (namedAsJunk) return false;
+
+  // Unknown size and no intent signal: keep it. Losing a real image is worse
+  // than keeping a doubtful one, and the user can switch the filter off.
+  return true;
+}
+
+function absolutize(el, attr, base) {
+  const value = el.getAttribute(attr);
+  if (!value) return;
+  try {
+    el.setAttribute(attr, new URL(value, base).href);
+  } catch {}
+}
+
+// Clone with shadow content spliced in, so web-component text survives extraction.
+function deepClone(node, doc) {
+  if (node.nodeType === Node.TEXT_NODE) return doc.createTextNode(node.nodeValue || '');
+  if (node.nodeType !== Node.ELEMENT_NODE) return null;
+
+  const clone = node.cloneNode(false);
+  // cloneNode copies the `checked` *attribute*, not the current property, so a
+  // box the user ticked would clone as unchecked. Record the live state.
+  if (node.tagName === 'INPUT' && node.type === 'checkbox') {
+    clone.setAttribute('data-checked', String(node.checked));
+  }
+  // Significance depends on rendered geometry, which only the live node has.
+  if (node.tagName === 'IMG') {
+    clone.setAttribute('data-significant', String(isSignificantImage(node)));
+    if (node.currentSrc) clone.setAttribute('data-resolved-src', node.currentSrc);
+  }
+  if (node.shadowRoot) {
+    for (const child of node.shadowRoot.childNodes) {
+      const c = deepClone(child, doc);
+      if (c) clone.appendChild(c);
+    }
+  }
+  for (const child of node.childNodes) {
+    const c = deepClone(child, doc);
+    if (c) clone.appendChild(c);
+  }
+  return clone;
+}
+
+const normalizeTitle = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+export function buildCleanTree(root, {
+  keepImages = true,
+  onlySignificantImages = true,
+  baseUrl = location.href,
+  title = '',
+  faithful = false,
+  harvested = [],
+  sourceRoot = null,
+  keepInteractionPrompts = false,
+} = {}) {
+  const doc = document.implementation.createHTMLDocument('');
+  const clone = deepClone(root, doc);
+  if (!clone) return doc.createElement('div');
+
+  // These compare the clone against the live tree by walk position, so they
+  // must run before any removal shifts the indices.
+  if (faithful) captureFaithfulStyles(root, clone);
+  if (harvested.length) spliceHarvestedWidgets(clone, harvested, sourceRoot || root);
+  stripDecorativeSvg(clone, root);
+  stripScreenReaderOnly(clone, root);
+
+  // Anything still carrying the `hidden` attribute at this point was
+  // deliberately left hidden — Article mode does not reveal carousel/stepper
+  // panels, and cloneNode copies the attribute regardless of computed style.
+  // Without this, Article would export every slide's text anyway: only the
+  // live page's visibility differs, and that distinction is lost once the
+  // tree is flattened into HTML/Markdown. Runs after the walk-position-
+  // sensitive passes above, since it removes nodes and would shift their
+  // indices otherwise.
+  clone.querySelectorAll('[hidden]').forEach((el) => el.remove());
+
+  // Advertising first: ad containers often wrap otherwise-legitimate markup, so
+  // removing them early avoids salvaging their contents in later passes.
+  stripAdvertising(clone);
+  stripAppShell(clone);
+  if (!keepInteractionPrompts) stripInteractionPrompts(clone);
+
+  clone.querySelectorAll(STRIP_TAGS).forEach((el) => el.remove());
+  clone.querySelectorAll(STRIP_ROLES).forEach((el) => el.remove());
+
+  // Inputs are noise except task-list checkboxes, whose checked state is real
+  // content. Pin it to an attribute: the live `checked` property is not cloned.
+  clone.querySelectorAll('input').forEach((input) => {
+    if (input.type !== 'checkbox' || !input.closest('li')) { input.remove(); return; }
+    input.setAttribute('data-checked', String(input.checked));
+  });
+
+  // Unwrap <details> into a heading + content: the disclosure widget itself is
+  // meaningless on paper, and a closed one would hide its content.
+  clone.querySelectorAll('details').forEach((details) => {
+    const summary = details.querySelector(':scope > summary');
+    const fragment = doc.createDocumentFragment();
+    if (summary && (summary.textContent || '').trim()) {
+      const heading = doc.createElement('h3');
+      heading.textContent = summary.textContent.trim();
+      fragment.appendChild(heading);
+    }
+    summary?.remove();
+    while (details.firstChild) fragment.appendChild(details.firstChild);
+    details.replaceWith(fragment);
+  });
+
+  // The title block renders the title itself; a matching leading <h1> in the
+  // body would print it twice.
+  if (title) {
+    const firstHeading = clone.querySelector('h1');
+    if (firstHeading && normalizeTitle(firstHeading.textContent) === normalizeTitle(title)) {
+      // Only if it really is the lead: nothing substantial precedes it.
+      const preceding = (firstHeading.previousElementSibling?.textContent || '').trim();
+      if (preceding.length < 40) firstHeading.remove();
+    }
+  }
+
+  // A standalone byline directly under the title duplicates the meta line.
+  const leadParagraph = clone.querySelector('p');
+  if (leadParagraph && BYLINE.test(`${leadParagraph.className || ''} ${leadParagraph.id || ''}`)) {
+    if ((leadParagraph.textContent || '').trim().length < 80) leadParagraph.remove();
+  }
+  clone.querySelectorAll('header, nav, footer, aside').forEach((el) => {
+    // A <header> inside the article is usually its title block; only outer chrome goes.
+    if (el.closest('article') === clone.closest?.('article') && el.parentElement === clone) el.remove();
+    else if (!clone.contains(el.parentElement) || el.parentElement === clone) el.remove();
+    else if (UNLIKELY.test(`${el.className || ''} ${el.id || ''}`)) el.remove();
+  });
+
+  // Drop boilerplate by class/id, but never anything still carrying real prose.
+  //
+  // Size alone is not a safe guard here: a real navigation sidebar (course
+  // module list, chapter list) easily exceeds the 200-char threshold because
+  // it names several lessons, yet it is still navigation, not lesson content.
+  // A high link density is the more reliable tell — prose rarely runs link-to-
+  // link, but a nav list is nearly all links — so it overrides the size
+  // allowance for elements whose class already matched UNLIKELY.
+  clone.querySelectorAll('*').forEach((el) => {
+    const meta = `${el.className || ''} ${el.id || ''}`;
+    if (!meta.trim()) return;
+    if (UNLIKELY.test(meta) && !MAYBE_CANDIDATE.test(meta)) {
+      const text = (el.textContent || '').trim();
+      if (text.length < 200 || linkDensity(el) > 0.4) el.remove();
+    }
+  });
+
+  // Strip event handlers and dangerous URLs. The reader page renders this HTML,
+  // so nothing executable may survive.
+  clone.querySelectorAll('*').forEach((el) => {
+    Array.from(el.attributes || []).forEach((attr) => {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith('on')) el.removeAttribute(attr.name);
+      if ((name === 'href' || name === 'src') && /^\s*javascript:/i.test(attr.value)) {
+        el.removeAttribute(attr.name);
+      }
+    });
+  });
+
+  clone.querySelectorAll('a[href]').forEach((a) => {
+    absolutize(a, 'href', baseUrl);
+    a.setAttribute('rel', 'noopener noreferrer');
+  });
+
+  clone.querySelectorAll('img').forEach((img) => {
+    if (!keepImages) { img.remove(); return; }
+
+    // Drop decoration (icons, spacers, avatars, trackers) so only images that
+    // carry meaning reach the PDF and Markdown.
+    if (onlySignificantImages && img.getAttribute('data-significant') === 'false') {
+      const figure = img.closest('figure');
+      // A figure whose only content was the image goes with it.
+      if (figure && !figure.querySelector('img:not([data-significant="false"])')) figure.remove();
+      else img.remove();
+      return;
+    }
+
+    // Prefer the srcset candidate the browser actually picked.
+    const resolved = img.getAttribute('data-resolved-src');
+    if (resolved) img.setAttribute('src', resolved);
+
+    absolutize(img, 'src', baseUrl);
+    ['srcset', 'sizes', 'loading', 'data-significant', 'data-resolved-src'].forEach((a) => img.removeAttribute(a));
+
+    const src = img.getAttribute('src');
+    if (!src || src.startsWith('data:image/gif')) img.remove();
+  });
+
+  // Frozen viewport heights are correct for capturing the live page, but on
+  // paper they reserve dead whitespace. Content must size to itself once
+  // reflowed. Faithful mode keeps its box styling and only drops sizing that
+  // would strand blank space or break pagination.
+  const sizingProps = faithful
+    ? ['height', 'min-height', 'max-height']
+    : ['height', 'min-height', 'max-height', 'width', 'min-width', 'max-width',
+       'position', 'top', 'left', 'right', 'bottom', 'transform', 'float'];
+
+  clone.querySelectorAll('[style]').forEach((el) => {
+    if (el.tagName === 'IMG' || el.tagName === 'VIDEO' || el.tagName === 'CANVAS') return;
+    sizingProps.forEach((prop) => el.style.removeProperty(prop));
+    if (!el.getAttribute('style')?.trim()) el.removeAttribute('style');
+  });
+  clone.querySelectorAll('[height], [width]').forEach((el) => {
+    if (el.tagName === 'IMG' || el.tagName === 'CANVAS' || el.tagName === 'VIDEO') return;
+    el.removeAttribute('height');
+    el.removeAttribute('width');
+  });
+
+  // Collapse empties left behind by removals.
+  //
+  // `li` matters as much as the rest: carousel pagination dots are often list
+  // items whose visible number comes from CSS, so they carry no text and would
+  // otherwise export as a run of bare "- " bullets.
+  let pass = 0;
+  while (pass++ < 3) {
+    let removed = 0;
+    clone.querySelectorAll('div, span, section, p, li, dd, dt, td, th').forEach((el) => {
+      if (el.children.length) return;
+      if ((el.textContent || '').trim()) return;
+      if (el.querySelector('img, video, figure')) return;
+      el.remove();
+      removed++;
+    });
+
+    // A list left with no items is just a stray bullet marker.
+    clone.querySelectorAll('ul, ol, dl').forEach((list) => {
+      if (list.children.length) return;
+      list.remove();
+      removed++;
+    });
+
+    if (!removed) break;
+  }
+
+  return clone;
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+// Properties worth carrying into Faithful mode: they define the visual identity
+// of the source without dragging along layout that breaks on paper.
+const FAITHFUL_PROPS = [
+  'color', 'background-color', 'background-image', 'font-family', 'font-size',
+  'font-weight', 'font-style', 'line-height', 'letter-spacing', 'text-align',
+  'text-decoration-line', 'text-transform', 'border-top', 'border-right',
+  'border-bottom', 'border-left', 'border-radius', 'padding-top', 'padding-right',
+  'padding-bottom', 'padding-left', 'margin-top', 'margin-bottom', 'list-style-type',
+];
+
+const DEFAULTS_TO_SKIP = new Set([
+  'rgba(0, 0, 0, 0)', 'none', 'normal', 'auto', '0px', 'start', 'currentcolor',
+]);
+
+// Snapshot computed styles from the live page onto the cloned tree, matching
+// nodes by walk order. Fixed/sticky positioning and viewport sizing are dropped:
+// they are meaningless once the content is reflowed onto paper.
+function captureFaithfulStyles(liveRoot, cloneRoot) {
+  const live = [liveRoot, ...liveRoot.querySelectorAll('*')];
+  const clones = [cloneRoot, ...cloneRoot.querySelectorAll('*')];
+  const limit = Math.min(live.length, clones.length);
+
+  for (let i = 0; i < limit; i++) {
+    const source = live[i];
+    const target = clones[i];
+    if (!(source instanceof Element) || !(target instanceof Element)) continue;
+    if (source.tagName !== target.tagName) continue; // walks diverged; stop trusting the pairing
+
+    let computed;
+    try {
+      computed = window.getComputedStyle(source);
+    } catch {
+      continue;
+    }
+
+    const declarations = [];
+    for (const prop of FAITHFUL_PROPS) {
+      const value = computed.getPropertyValue(prop);
+      if (!value || DEFAULTS_TO_SKIP.has(value)) continue;
+      if (prop === 'background-image' && value.startsWith('url(')) continue; // often decorative sprites
+      declarations.push(`${prop}:${value}`);
+    }
+
+    if (declarations.length) {
+      const existing = target.getAttribute('style');
+      target.setAttribute('style', (existing ? existing + ';' : '') + declarations.join(';'));
+    }
+  }
+}
+
+// Build a document from the user's current selection instead of the whole page.
+//
+// Runs synchronously against the live selection — none of the page-materializing
+// passes apply, because the user has already chosen exactly what they want and
+// expanding or clicking things would change it under them.
+export function extractSelection({ keepImages = true, onlySignificantImages = true } = {}) {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+
+  const doc = document.implementation.createHTMLDocument('');
+  const holder = doc.createElement('div');
+
+  for (let i = 0; i < selection.rangeCount; i++) {
+    const range = selection.getRangeAt(i);
+    if (range.collapsed) continue;
+    // cloneContents keeps element structure (headings, lists, tables), unlike
+    // toString() which would flatten everything to plain text.
+    holder.appendChild(doc.importNode(range.cloneContents(), true));
+  }
+
+  const text = (holder.textContent || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+
+  // A selection that starts mid-element arrives without its wrapper, so a
+  // partial list or table can appear as loose fragments. That is acceptable —
+  // it mirrors what the user highlighted.
+  const styles = new StyleManager();
+  let tree;
+  try {
+    tree = buildCleanTree(holder, {
+      keepImages,
+      onlySignificantImages: false, // the user picked these deliberately
+      baseUrl: location.href,
+    });
+  } finally {
+    styles.restore();
+  }
+
+  const metadata = extractMetadata(document, tree);
+
+  // Prefer a heading inside the selection; otherwise label it by its opening
+  // words. When the heading *is* the label, drop it from the body so the
+  // document does not print the same line twice.
+  const headingEl = tree.querySelector('h1, h2, h3');
+  const heading = headingEl?.textContent?.replace(/\s+/g, ' ').trim();
+  const snippet = text.length > 60 ? `${text.slice(0, 57)}…` : text;
+
+  if (heading) {
+    metadata.title = heading;
+    // Only if it leads the selection — a heading further down is real content.
+    if (tree.firstElementChild === headingEl) headingEl.remove();
+  } else {
+    metadata.title = snippet || metadata.title;
+  }
+
+  const totalImages = holder.querySelectorAll('img').length;
+  const keptImages = tree.querySelectorAll('img').length;
+
+  // Recompute after the possible heading removal, so the word count matches
+  // what the document actually contains.
+  const bodyText = (tree.textContent || '').replace(/\s+/g, ' ').trim();
+
+  return {
+    metadata,
+    html: tree.innerHTML,
+    faithfulHtml: tree.innerHTML,
+    text: bodyText,
+    wordCount: bodyText.split(/\s+/).filter(Boolean).length,
+    images: { total: totalImages, kept: keptImages },
+    blockedFrames: [],
+    isSelection: true,
+    sourceUrl: location.href,
+  };
+}
+
+// A course platform's own lesson list, usually a left-hand sidebar. Detected
+// by the same "sidebar"/"nav" class signal used to exclude it from lesson
+// content (see the link-density removal in buildCleanTree) — the two are the
+// same element seen from opposite purposes: content extraction discards it,
+// course-wide capture reads links out of it. Same-origin links only, and the
+// current page is excluded since it is already what the caller has open.
+const COURSE_NAV_CONTAINER = /course-nav|lesson-nav|module-nav|curriculum|syllabus|sidebar/i;
+
+// Page types a course nav commonly links to that are not readable prose: a
+// graded quiz, a hands-on lab environment, a bare video. Capturing these
+// yields a thin or meaningless section (a lab is an iframe to an external
+// sandbox; a quiz is form inputs), so they are skipped by their link label
+// before ever navigating to them, rather than visited and discarded after.
+const NON_READING_PAGE = /knowledge\s*check|quiz|assessment|exam|survey|virtual\s*lab|^lab\b|\blab\s*exercise|video\b/i;
+
+export function discoverCourseLessonLinks(doc = document) {
+  const containers = Array.from(doc.querySelectorAll('nav, aside, [class*="nav"], [class*="sidebar"]'))
+    .filter((el) => COURSE_NAV_CONTAINER.test(`${el.className || ''} ${el.id || ''}`));
+
+  const seen = new Map(); // href -> title, insertion order = document order
+  containers.forEach((container) => {
+    container.querySelectorAll('a[href]').forEach((a) => {
+      const title = normalizeSnippet(a.textContent);
+      // Never follow a link whose own text, aria-label or title reads like
+      // leaving the course — "Save and exit", "Submit", "Logout" and similar
+      // routinely sit in the same sidebar as real lesson links. Following one
+      // during a whole-course walk is far worse than clicking it in place:
+      // it can end an enrollment or sign the learner out entirely.
+      const aria = `${a.getAttribute('aria-label') || ''} ${a.getAttribute('title') || ''}`;
+      if (TAB_UNSAFE.test(title) || TAB_UNSAFE.test(aria)) return;
+      if (NON_READING_PAGE.test(title) || NON_READING_PAGE.test(aria)) return;
+
+      let url;
+      try {
+        url = new URL(a.getAttribute('href'), doc.location.href);
+      } catch {
+        return;
+      }
+      if (url.origin !== doc.location.origin) return;
+      if (url.href === doc.location.href.split('#')[0]) return;
+      if (seen.has(url.href)) return;
+
+      const finalTitle = title || url.pathname;
+      if (!finalTitle) return;
+      seen.set(url.href, finalTitle);
+    });
+  });
+
+  return Array.from(seen, ([url, title]) => ({ url, title }));
+}
+
+export async function extractDocument({
+  keepImages = true,
+  onlySignificantImages = true,
+  keepInteractionPrompts = false,
+  // What to do with interactive content:
+  //   'expand'  — walk every tab, step and collapsed region (Book)
+  //   'current' — take the page exactly as it stands (Article)
+  // Expanding clicks through widgets, which takes time and briefly changes the
+  // live page, so it is a deliberate choice rather than something that always
+  // happens.
+  interactive = 'expand',
+  onProgress,
+} = {}) {
+  const styles = new StyleManager();
+  const expandAll = interactive !== 'current';
+  try {
+    // Single-page apps render their content after the HTML loads. Extracting
+    // before that captures an empty shell, so wait for the DOM to settle first.
+    onProgress?.({ phase: 'waiting' });
+    await waitForContent();
+
+    // Relax copy locks first: overlays and selection blocks otherwise interfere
+    // with measuring and clicking the content underneath them.
+    onProgress?.({ phase: 'reveal' });
+    collectDocuments().forEach((doc) => {
+      try { neutraliseCopyProtection(styles, doc); } catch {}
+    });
+
+    // Always undo styling that makes content unreadable (clamps, fade masks,
+    // display:none lesson containers). Only *expanding* collapsed regions —
+    // opening accordions and tab panels the reader had closed — is Book-only.
+    revealHiddenContent(styles, collectDocuments(), { expand: expandAll });
+
+    onProgress?.({ phase: 'lazy' });
+    await materializeLazyContent(styles, { onProgress: (p) => onProgress?.({ phase: 'lazy', progress: p }) });
+
+    // Re-run: lazily inserted subtrees arrive hidden too.
+    revealHiddenContent(styles, collectDocuments(), { expand: expandAll });
+
+    // Click through tabbed/stepped widgets and collect every panel. Must happen
+    // while the page is live — the panels do not exist simultaneously.
+    //
+    // Course players load the lesson into a same-origin frame, so the widgets
+    // (flashcards, steppers, tabs) live in that frame's document, not this one.
+    const harvested = [];
+    if (expandAll) {
+      onProgress?.({ phase: 'widgets' });
+      for (const doc of collectDocuments()) {
+        try {
+          harvested.push(...await harvestInteractiveWidgets(styles, doc));
+        } catch {}
+      }
+    }
+
+    // SVG-drawn sliders (Articulate Storyline/Rise glossary widgets) are
+    // unconditional, unlike the tab/stepper/flashcard widgets above: those
+    // panels already exist in the DOM (just hidden), so clicking one in
+    // Article mode would be indistinguishable from "the page as it stands".
+    // Here the term's definition genuinely does not exist until clicked, so
+    // this is the one widget shape Article still clicks through — the
+    // alternative is an empty-looking panel with no way to read it at all.
+    // A widget that yields nothing (couldn't find its controls, or clicking
+    // revealed no real text) is simply not spliced in, rather than left as a
+    // dead shell.
+    for (const doc of collectDocuments()) {
+      try {
+        harvested.push(...await harvestSvgSliders(styles, doc));
+      } catch {}
+    }
+
+    onProgress?.({ phase: 'extract' });
+
+    // Note frames we cannot read (SCORM players, embedded courseware): their
+    // content is genuinely unreachable and the user needs to be told.
+    const blockedFrames = [];
+    const documents = collectDocuments(document, blockedFrames);
+
+    // Freeze vh/vw before measuring anything: those lengths would otherwise
+    // resolve against the print viewport and change the captured layout.
+    freezeViewportUnits(styles);
+
+    // Course players and embedded readers put the real content in a same-origin
+    // frame, so score every reachable document and keep the richest result.
+    //
+    // Compare *prose*, not raw textContent: a top-level root that merely wraps
+    // the player would otherwise win by counting the frame's own text through
+    // the iframe element, and the frame would never be chosen.
+    let root = findContentRoot(document);
+    let rootScore = proseLength(root);
+
+    for (const frameDoc of documents) {
+      if (frameDoc === document) continue;
+      let candidate;
+      try {
+        candidate = findContentRoot(frameDoc);
+      } catch {
+        continue;
+      }
+      const score = proseLength(candidate);
+      // A frame that carries real prose wins outright over a top-level root
+      // that has little: an <iframe> contributes no text to its parent, so the
+      // parent can never out-score the lesson it hosts. Without this the
+      // scorer settles on whatever scrap of chrome sits beside the player.
+      if (score > rootScore * 1.2 || (score > 200 && score > rootScore)) {
+        root = candidate;
+        rootScore = score;
+      }
+    }
+    // Metadata comes from the top document (which owns the og:/JSON-LD tags),
+    // but a frame-hosted lesson usually has the better heading.
+    const metadata = extractMetadata(document, root);
+    if (root.ownerDocument !== document) {
+      const frameHeading = root.querySelector('h1, h2')?.textContent?.trim();
+      const generic = !metadata.title || /^(untitled|home|loading)$/i.test(metadata.title);
+      if (frameHeading && (generic || frameHeading.length > metadata.title.length)) {
+        metadata.title = frameHeading;
+      }
+    }
+
+    // Build both variants now, while the live page is still expanded, so the
+    // preview can switch styles without re-reading the page.
+    // Relative URLs inside a frame resolve against that frame's document.
+    const common = {
+      keepImages,
+      onlySignificantImages,
+      keepInteractionPrompts,
+      title: metadata.title,
+      baseUrl: root.ownerDocument?.location?.href || location.href,
+    };
+    const tree = buildCleanTree(root, { ...common, harvested, sourceRoot: root });
+    const faithfulTree = buildCleanTree(root, {
+      ...common, faithful: true, harvested, sourceRoot: root,
+    });
+
+    // Report what the filter kept, so the UI can offer to include everything.
+    const totalImages = root.querySelectorAll('img').length;
+    const keptImages = tree.querySelectorAll('img').length;
+
+    return {
+      metadata,
+      html: tree.innerHTML,
+      faithfulHtml: faithfulTree.innerHTML,
+      text: (tree.textContent || '').replace(/\s+/g, ' ').trim(),
+      wordCount: (tree.textContent || '').trim().split(/\s+/).filter(Boolean).length,
+      images: { total: totalImages, kept: keptImages },
+      blockedFrames,
+      // How many interactive panels were walked, so the preview can say whether
+      // expanding actually found anything.
+      expandedPanels: harvested.reduce((sum, h) => sum + h.sections.length, 0),
+      interactive,
+      ...(window.__clearCopyDebug ? { debugLog: window.__clearCopyDebugLog || [] } : {}),
+    };
+  } finally {
+    styles.restore();
+  }
+}

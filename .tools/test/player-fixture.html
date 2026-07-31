@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>(KGLL-205) Securing Services on Kong Gateway - Theory Lesson | Kong Academy</title>
+<style>
+  body { margin: 0; font-family: system-ui; }
+  .scorm-overlay { position: fixed; inset: 0; }
+  .scorm-launch-window { width: 900px; height: 640px; margin: 20px auto; border: 1px solid #ccc; }
+  #scorm-content { width: 100%; height: 560px; }
+  #scorm-content iframe { width: 100%; height: 100%; border: 0; }
+</style>
+</head>
+<body class="course-progression-redesign">
+
+<div class="course-progression-redesign__wrapper">
+  <section id="main-content">
+    <main class="course-progression-redesign__main">
+      <div id="module-view-wrapper">
+        <!-- Before Relaunch this is all there is: a title and a button. -->
+        <lup-show-page-segment>
+          <h2 class="module-title">Theory Lesson</h2>
+          <button id="relaunch">Relaunch</button>
+        </lup-show-page-segment>
+      </div>
+    </main>
+
+    <!-- The player. #scorm-content is EMPTY until Relaunch fills it, which is
+         why deleting it unconditionally destroyed the whole lesson. -->
+    <div class="scorm-overlay scorm-container">
+      <div class="scorm-launch-window" id="launch_scorm_window_wrap">
+        <header>
+          <p class="scorm-launch-window-title" id="scorm-content-title"></p>
+          <luds-button id="scorm_close_button">Save and exit</luds-button>
+        </header>
+        <div class="scorm-info-message">
+          <p>You must click here to correctly close/save your progress when you have finished viewing or completed your module.</p>
+          <button id="close-scorm-notice">Got it!</button>
+        </div>
+        <section id="scorm-content" class="scorm-content"></section>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+  // Relaunch loads the lesson into a same-origin frame — the URL never changes.
+  function launch() {
+    const host = document.getElementById('scorm-content');
+    if (host.querySelector('iframe')) return;
+    const frame = document.createElement('iframe');
+    frame.src = 'player-lesson.html';
+    host.appendChild(frame);
+  }
+  document.getElementById('relaunch').addEventListener('click', launch);
+
+  // The real page requires a click. Auto-launch here so the fixture is
+  // deterministic; the extractor must cope either way.
+  setTimeout(launch, 300);
+</script>
+
+</body>
+</html>

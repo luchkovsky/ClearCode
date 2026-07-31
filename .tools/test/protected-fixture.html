@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Protected Content</title>
+<style>
+  body { margin: 0; font-family: system-ui; }
+  /* 1. CSS selection lock across the article */
+  .no-copy, .no-copy * {
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    user-select: none;
+  }
+  /* 2. Transparent overlay parked on top of the text */
+  .shield {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 1400px;
+    background: transparent;
+    z-index: 9999;
+  }
+  .wrap { position: relative; }
+  /* A legitimate sticky header that must NOT be removed */
+  .real-header {
+    position: fixed; top: 0; left: 0; right: 0; height: 48px;
+    background: #123; color: #fff; z-index: 50;
+  }
+</style>
+</head>
+<body oncopy="return false" onselectstart="return false" oncontextmenu="return false">
+
+<div class="real-header">Site header with visible text</div>
+
+<div class="wrap">
+  <!-- The overlay sits above everything and blocks selection. -->
+  <div class="shield"></div>
+
+  <article class="no-copy" oncopy="return false" ondragstart="return false">
+    <h1>Protected Lesson Content</h1>
+
+    <p>This paragraph is inside a container with user-select disabled, under a
+    transparent overlay, on a page with copy and selection handlers that return
+    false. All of it is ordinary DOM text that the reader can already see.</p>
+
+    <h2>Second Section</h2>
+    <p>A second protected paragraph that must also be recovered in full when the
+    document is exported, including the list and code sample that follow it.</p>
+
+    <ul>
+      <li>Protected list item one</li>
+      <li>Protected list item two</li>
+    </ul>
+
+    <pre><code>protected_code_sample()</code></pre>
+
+    <table>
+      <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+      <tbody><tr><td>Shield</td><td>Transparent overlay element</td></tr></tbody>
+    </table>
+  </article>
+</div>
+
+<script>
+  // 3. Programmatic handlers assigned as properties.
+  document.oncopy = () => false;
+  document.onselectstart = () => false;
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
+</script>
+
+</body>
+</html>

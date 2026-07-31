@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Hardening the Kong Data Plane</title>
+</head>
+<body>
+
+<!-- Reproduces Rise 360's own carousel component (block-process-card), which
+     is plain HTML with every slide's text already in the DOM — inactive
+     slides carry the `hidden` and `inert` attributes, not CSS display:none.
+     No click is needed to make the text exist, only to unhide it, unlike the
+     Articulate SVG slider case which requires simulated clicks. -->
+<article>
+  <h1>Hardening the Kong Data Plane</h1>
+  <p>There are a few other specific security measures to consider in your Kong deployment.</p>
+
+  <div class="carousel-slides" aria-live="polite">
+    <div class="carousel-slide" role="group">
+      <h2>Key Measures for Securing Kong</h2>
+      <p>Securing the Kong data plane is essential to ensure the integrity and reliability of your API traffic.</p>
+    </div>
+    <div class="carousel-slide" hidden inert role="group">
+      <h2>Enable Health Checks for Data Plane</h2>
+      <p>Health checks are vital for monitoring the status and performance of the Kong data plane.</p>
+    </div>
+    <div class="carousel-slide" hidden inert role="group">
+      <h2>Manage mTLS Certificates Effectively</h2>
+      <p>Mutual TLS certificates are critical for securing communication between the Kong data plane and other components.</p>
+    </div>
+    <div class="carousel-slide" hidden inert role="group">
+      <h2>Secure Keys in a Vault</h2>
+      <p>Storing sensitive keys in a secure vault is a best practice for protecting your API traffic.</p>
+    </div>
+  </div>
+
+  <p>Hardening the Kong data plane involves implementing health checks, managing mTLS certificates, securing keys, and disabling debug headers.</p>
+</article>
+
+</body>
+</html>

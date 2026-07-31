@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Clear Copy — Settings</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1a1d23; --raised: #23272f; --border: #2e333c;
+    --fg: #e6e8ec; --muted: #9099a6; --accent: #4c8dff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f2f3f5; --panel: #fff; --raised: #f0f2f5; --border: #dfe2e8;
+      --fg: #1b1e23; --muted: #646b76;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 20px;
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  header h1 { margin: 0; font-size: 20px; font-weight: 650; }
+  .sub { margin: 0 0 28px; color: var(--muted); font-size: 13px; }
+
+  section {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px 20px; margin-bottom: 16px;
+  }
+  section h2 {
+    margin: 0 0 4px; font-size: 12px; font-weight: 650;
+    text-transform: uppercase; letter-spacing: .07em; color: var(--muted);
+  }
+  section .hint { margin: 0 0 14px; font-size: 12.5px; color: var(--muted); }
+
+  .field {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 10px 0; border-top: 1px solid var(--border);
+  }
+  .field:first-of-type { border-top: 0; }
+  .field label { flex: 1; cursor: pointer; }
+  .field .name { display: block; font-weight: 500; }
+  .field .desc { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .field input[type="checkbox"] { margin-top: 3px; accent-color: var(--accent); cursor: pointer; width: 16px; height: 16px; }
+  .field select, .field input[type="number"] {
+    background: var(--raised); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 9px; font: inherit; font-size: 13px; min-width: 130px;
+  }
+
+  table.keys { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.keys td { padding: 8px 0; border-top: 1px solid var(--border); }
+  table.keys tr:first-child td { border-top: 0; }
+  table.keys td:last-child { text-align: right; }
+  kbd {
+    display: inline-block; background: var(--raised);
+    border: 1px solid var(--border); border-bottom-width: 2px;
+    border-radius: 5px; padding: 3px 7px;
+    font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  kbd.unset { color: var(--muted); font-style: italic; border-style: dashed; }
+
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 22px; }
+  button {
+    background: var(--raised); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 7px;
+    padding: 8px 14px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.08); }
+  .status { font-size: 12.5px; color: var(--muted); min-height: 18px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>
+    <h1>Clear Copy</h1>
+  </header>
+  <p class="sub">Settings for capturing pages and selections.</p>
+
+  <section>
+    <h2>Keyboard shortcuts</h2>
+    <p class="hint">
+      Chrome owns shortcut assignment. Click below to change or clear them —
+      the page opens in a new tab.
+    </p>
+    <table class="keys" id="shortcuts"></table>
+    <div class="actions">
+      <button id="editShortcuts">Change shortcuts…</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>What gets captured</h2>
+    <p class="hint">Applies to shortcuts, the context menu, and the popup.</p>
+
+    <div class="field">
+      <input type="checkbox" id="keepImages">
+      <label for="keepImages">
+        <span class="name">Include images</span>
+        <span class="desc">Off strips every image from captured pages.</span>
+      </label>
+    </div>
+
+    <div class="field">
+      <input type="checkbox" id="onlySignificantImages">
+      <label for="onlySignificantImages">
+        <span class="name">Meaningful images only</span>
+        <span class="desc">Drops icons, avatars, spacers and tracking pixels. Turn off if a picture goes missing.</span>
+      </label>
+    </div>
+
+    <div class="field">
+      <input type="checkbox" id="keepInteractionPrompts">
+      <label for="keepInteractionPrompts">
+        <span class="name">Keep “click to…” prompts</span>
+        <span class="desc">Instructions like “Click to flip” are removed by default, since the panels they refer to are already laid out.</span>
+      </label>
+    </div>
+  </section>
+
+  <section>
+    <h2>After capturing</h2>
+
+    <div class="field">
+      <input type="checkbox" id="notifyOnCapture">
+      <label for="notifyOnCapture">
+        <span class="name">Show a badge confirmation</span>
+        <span class="desc">Briefly shows the collection count on the toolbar icon. A keyboard capture is otherwise silent.</span>
+      </label>
+    </div>
+
+    <div class="field">
+      <input type="checkbox" id="openPreviewAfterAdd">
+      <label for="openPreviewAfterAdd">
+        <span class="name">Open the preview immediately</span>
+        <span class="desc">Off keeps you on the page so you can carry on collecting.</span>
+      </label>
+    </div>
+  </section>
+
+  <section>
+    <h2>Preview defaults</h2>
+    <p class="hint">Starting point for new previews; you can still change them per document.</p>
+
+    <div class="field">
+      <label for="defaultDocType">
+        <span class="name">Document type</span>
+        <span class="desc">Article is one continuous page; Book is paginated with running heads.</span>
+      </label>
+      <select id="defaultDocType">
+        <option value="article">Article</option>
+        <option value="book">Book</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="defaultStyle">
+        <span class="name">Style</span>
+        <span class="desc">Reader rebuilds the typography; Faithful keeps the site’s own look.</span>
+      </label>
+      <select id="defaultStyle">
+        <option value="reader">Reader</option>
+        <option value="faithful">Faithful</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="maxCollectionItems">
+        <span class="name">Collection limit</span>
+        <span class="desc">Oldest entries are dropped beyond this many pages.</span>
+      </label>
+      <input type="number" id="maxCollectionItems" min="1" max="500" step="1">
+    </div>
+  </section>
+
+  <section>
+    <h2>Collection</h2>
+    <p class="hint" id="collectionSummary">—</p>
+    <div class="actions">
+      <button id="openPreview">Open preview</button>
+      <button id="clearCollection">Clear collection</button>
+    </div>
+  </section>
+
+  <div class="actions">
+    <button class="primary" id="save">Save settings</button>
+    <button id="reset">Reset to defaults</button>
+    <span class="status" id="status"></span>
+  </div>
+
+</div>
+<script type="module" src="options.js"></script>
+</body>
+</html>

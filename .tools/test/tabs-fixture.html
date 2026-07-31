@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Securing Kong Gateway Runtime</title>
+<style>
+  body { margin: 0; font-family: system-ui; }
+  .widget { border: 2px solid #a9d1f7; max-width: 700px; margin: 20px; }
+  .widget-title { background: #333; color: #fff; padding: 10px 14px; font-size: 18px; }
+  .widget-body { display: flex; padding: 10px; gap: 4px; }
+  .tabs { display: flex; gap: 4px; }
+  .tab {
+    writing-mode: vertical-rl;
+    background: #3d7ebf; color: #fff;
+    padding: 10px 6px; cursor: pointer; border: 0;
+    font-size: 13px;
+  }
+  .tab.active { background: #22a02c; }
+  /* One reused panel: clicking a tab REPLACES its text. */
+  .panel { flex: 1; background: #fff; border: 1px solid #ccc; padding: 14px; min-height: 220px; }
+</style>
+</head>
+<body>
+
+<article>
+  <h1>Securing Kong Gateway Runtime</h1>
+  <p>Securing Kong Gateway Runtime can be broadly classified into two categories, covering both the transport layer and the application layer of your deployed APIs.</p>
+  <ul>
+    <li><strong>Securing the Data Plane</strong>: Protecting the communication channel between client and API.</li>
+    <li><strong>Securing API Services</strong>: Access control and usage enforcement at the application layer.</li>
+  </ul>
+
+  <p><em>Click on each tab to know about different aspects of securing Kong Gateway Runtime</em></p>
+
+  <div class="widget">
+    <div class="widget-title">Securing Gateway Runtime</div>
+    <div class="widget-body">
+      <div class="tabs" role="tablist">
+        <button class="tab active" role="tab" data-key="auth">Authentication</button>
+        <button class="tab" role="tab" data-key="bot">Bot Detection</button>
+        <button class="tab" role="tab" data-key="enc">Data encryption</button>
+        <button class="tab" role="tab" data-key="ip">IP Restriction</button>
+        <button class="tab" role="tab" data-key="threat">Threat detection</button>
+        <button class="tab" role="tab" data-key="ddos">DDOS Prevention</button>
+        <button class="tab" role="tab" data-key="intercept">Interception prevention</button>
+        <button class="tab" role="tab" data-key="rate">Rate Limiting</button>
+        <!-- Destructive controls styled as tabs. Synthetic clicks must skip
+             these: on a real course page they submit, navigate or mark
+             progress. If one is clicked, the marker below appears. -->
+        <button class="tab" role="tab" id="danger-submit">Submit Quiz</button>
+        <button class="tab" role="tab" id="danger-exit">Exit Course</button>
+        <button class="tab" role="tab" id="danger-complete">Mark Complete</button>
+      </div>
+      <div class="panel" id="panel">
+        <h3 id="panel-title">Authentication</h3>
+        <p id="panel-body">Process of verifying the identity of a client or user trying to access an API.</p>
+      </div>
+    </div>
+  </div>
+
+  <h2>Kong Support for securing Runtime</h2>
+  <p>Kong covers many of these aspects by implementing plugins and offers a wide range to choose from across authentication, security and traffic control.</p>
+</article>
+
+<script>
+  const CONTENT = {
+    auth:      ['Authentication', 'Process of verifying the identity of a client or user trying to access an API.'],
+    bot:       ['Bot Detection', 'Process of identifying and mitigating automated (bot) traffic that interacts with your API'],
+    enc:       ['Data encryption', 'Encoding data so that only authorised parties can read it, both in transit and at rest.'],
+    ip:        ['IP Restriction', 'Allowing or denying access to your API based on the client IP address or range.'],
+    threat:    ['Threat detection', 'Identifying malicious payloads and anomalous request patterns before they reach upstream.'],
+    ddos:      ['DDOS Prevention', 'Absorbing or rejecting distributed denial of service traffic aimed at your gateway.'],
+    intercept: ['Interception prevention', 'Preventing attackers from reading or modifying traffic between client and gateway.'],
+    rate:      ['Rate Limiting', 'Constraining how many requests a consumer may make within a given time window.'],
+  };
+
+  // If a destructive control is ever clicked it writes a marker into the page,
+  // which the validator asserts must never appear in the export.
+  ['danger-submit', 'danger-exit', 'danger-complete'].forEach((id) => {
+    document.getElementById(id).addEventListener('click', () => {
+      const marker = document.createElement('p');
+      marker.textContent = 'DESTRUCTIVE_ACTION_FIRED';
+      document.querySelector('article').appendChild(marker);
+    });
+  });
+
+  document.querySelectorAll('.tab[data-key]').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
+      tab.classList.add('active');
+      const [title, body] = CONTENT[tab.dataset.key];
+      // The panel is REUSED — this is what defeats reveal-based extraction.
+      document.getElementById('panel-title').textContent = title;
+      document.getElementById('panel-body').textContent = body;
+    });
+  });
+</script>
+
+</body>
+</html>

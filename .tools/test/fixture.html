@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>MD Fidelity</title>
+<meta property="og:title" content="Markdown Fidelity Test">
+</head><body>
+<nav><a href="/">Home</a></nav>
+<div class="ad-banner">SPONSORED: buy now</div>
+<article>
+<h1>Markdown Fidelity Test</h1>
+
+<h2>Heading Level 2</h2>
+<h3>Heading Level 3</h3>
+<h4>Heading Level 4</h4>
+<h5>Heading Level 5</h5>
+<h6>Heading Level 6</h6>
+
+<p>Inline styles: <strong>bold</strong>, <em>italic</em>, <b>b-tag</b>, <i>i-tag</i>,
+<code>code()</code>, <s>strike</s>, <del>del</del>, <a href="https://example.com/page">a link</a>,
+<strong><em>bold italic</em></strong>, <mark>marked</mark>, H<sub>2</sub>O, x<sup>2</sup>.</p>
+
+<p>Line one<br>line two after a br.</p>
+
+<h2>Unordered List</h2>
+<ul>
+  <li>Plain item</li>
+  <li>Item with <strong>bold</strong> and <a href="/l">link</a></li>
+  <li>Parent item
+    <ul>
+      <li>Nested level two</li>
+      <li>Nested with <em>emphasis</em>
+        <ul><li>Nested level three</li></ul>
+      </li>
+    </ul>
+  </li>
+</ul>
+
+<h2>Ordered List</h2>
+<ol>
+  <li>First</li>
+  <li>Second
+    <ol><li>Nested ordered a</li><li>Nested ordered b</li></ol>
+  </li>
+  <li>Third</li>
+</ol>
+
+<h2>Task List</h2>
+<ul>
+  <li><input type="checkbox" checked> Done task</li>
+  <li><input type="checkbox"> Pending task</li>
+</ul>
+
+<h2>Table With Header</h2>
+<table>
+  <thead><tr><th>Column A</th><th>Column B</th><th>Numeric</th></tr></thead>
+  <tbody>
+    <tr><td>value one</td><td><strong>bold cell</strong></td><td>42</td></tr>
+    <tr><td>pipe | inside</td><td><a href="/x">cell link</a></td><td>7</td></tr>
+  </tbody>
+</table>
+
+<h2>Table Without Header</h2>
+<table>
+  <tr><td>r1c1</td><td>r1c2</td></tr>
+  <tr><td>r2c1</td><td>r2c2</td></tr>
+</table>
+
+<h2>Table With Row Headers</h2>
+<table>
+  <tr><th>Name</th><td>Ada</td></tr>
+  <tr><th>Role</th><td>Engineer</td></tr>
+</table>
+
+<h2>Ragged Table</h2>
+<table>
+  <thead><tr><th>One</th><th>Two</th><th>Three</th></tr></thead>
+  <tbody>
+    <tr><td>only one</td></tr>
+    <tr><td>a</td><td>b</td><td>c</td></tr>
+  </tbody>
+</table>
+
+<h2>Code</h2>
+<pre><code class="language-python">def greet(name):
+    return f"hello {name}"
+</code></pre>
+
+<pre><code>plain code, no language
+  indented second line
+</code></pre>
+
+<h2>Quote</h2>
+<blockquote>
+  <p>First quoted paragraph.</p>
+  <p>Second quoted paragraph with <strong>bold</strong>.</p>
+</blockquote>
+
+<blockquote><p>Outer quote.<blockquote><p>Nested quote.</p></blockquote></p></blockquote>
+
+<h2>Media</h2>
+<figure>
+  <img src="https://example.com/pic.png" alt="Alt text here">
+  <figcaption>The caption</figcaption>
+</figure>
+
+<h2>Definition List</h2>
+<dl>
+  <dt>Term one</dt><dd>Definition of term one.</dd>
+  <dt>Term two</dt><dd>Definition of term two.</dd>
+</dl>
+
+<h2>Edge Cases</h2>
+<p>Literal asterisks *not emphasis* and underscores _not emphasis_ and backtick ` char.</p>
+<p>A URL bare: https://example.com/raw?a=1&amp;b=2</p>
+<p>Ampersand &amp; less-than &lt; greater-than &gt; quote &quot;.</p>
+
+
+<h2>Image Significance</h2>
+<p>Content image (large, has alt + figure):</p>
+<figure>
+  <img id="big" src="data:image/png;base64,iVBORw0KGgo=" alt="A meaningful chart of results" style="width:400px;height:300px">
+  <figcaption>Significant figure</figcaption>
+</figure>
+<p>Icon (small): <img id="icon" src="/assets/icon-star.png" alt="" style="width:16px;height:16px"></p>
+<p>Avatar: <img id="avatar" src="/img/avatar-user.jpg" alt="" style="width:40px;height:40px"></p>
+<p>Tracking pixel: <img id="tracker" src="/pixel.gif" style="width:1px;height:1px"></p>
+<p>Spacer: <img id="spacer" src="/spacer.png" alt="" style="width:300px;height:2px"></p>
+<p>Decorative role: <img id="deco" role="presentation" src="/big-decoration.png" alt="" style="width:400px;height:300px"></p>
+<p>Large unnamed but alt-texted: <img id="plain" src="/photos/scene.jpg" alt="A photograph of the coastline" style="width:500px;height:350px"></p>
+
+<h2>Advertising Cases</h2>
+<div class="ad-slot"><p>ADVERT: banner ad slot content</p></div>
+<div id="div-gpt-ad-12345"><p>ADVERT: google publisher tag</p></div>
+<ins class="adsbygoogle"><p>ADVERT: adsense unit</p></ins>
+<div class="sponsored-content"><p>ADVERT: sponsored article promo</p></div>
+<aside class="promo-box"><p>ADVERT: promotional aside</p></aside>
+<div data-ad-slot="x"><p>ADVERT: data attribute slot</p></div>
+<iframe src="https://doubleclick.net/ad" title="advertisement"></iframe>
+<div class="taboola-container"><p>ADVERT: taboola recommendations</p></div>
+<div class="outbrain-widget"><p>ADVERT: outbrain widget</p></div>
+<div class="cookie-consent"><p>We use cookies. Accept all?</p></div>
+<div class="newsletter-signup"><p>Subscribe to our newsletter!</p></div>
+<p class="legit">This legitimate paragraph mentions the word advertising in an academic sense and must survive because it is real editorial content of meaningful length.</p>
+<hr>
+
+<p>Final paragraph.</p>
+</article>
+<footer>Copyright 2024. All rights reserved.</footer>
+</body></html>
