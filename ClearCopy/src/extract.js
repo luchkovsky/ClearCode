@@ -787,6 +787,125 @@ async function harvestStepper(entry, doc) {
   return sections.length >= 2 ? { panel, sections } : null;
 }
 
+// A form renderer mounts only a rolling window of its questions and keeps the
+// rest in the form-definition payload it shipped to the browser. That is a
+// different shape from every widget above: those hide their panels *in* the
+// DOM, so a reveal or a click reaches them. Here the other questions are not
+// in the DOM in any form, and the only control that would advance the widget
+// submits an answer — TAB_UNSAFE forbids clicking it, correctly, since doing
+// so would file a real response. Reading the payload is both the sole way to
+// recover the content and the only safe one.
+//
+// Found by the shape of the data, not by hostname or a library's class names:
+// an array of objects that each carry a string `type` and a string `title`,
+// most of them long enough to be a real question. That is generic enough to
+// survive the vendor renaming its bundle and specific enough not to match an
+// analytics blob.
+const FORM_FIELD_ARRAY = /"fields"\s*:\s*\[/g;
+
+// A payload field is a question if it names a type and carries a real title.
+function looksLikeFormFields(arr) {
+  if (!Array.isArray(arr) || arr.length < 2) return false;
+  const usable = arr.filter((f) => f && typeof f.type === 'string' && typeof f.title === 'string');
+  if (usable.length < Math.max(2, arr.length * 0.6)) return false;
+  // Titles are prose, not identifiers: guards against matching a config blob
+  // whose entries happen to have `type` and `title` keys.
+  return usable.some((f) => f.title.trim().length >= 15);
+}
+
+// Pull the balanced array text starting at the '[' index, so a nested bracket
+// inside a label cannot truncate it.
+function sliceBalancedArray(text, openIndex) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = openIndex; i < text.length; i++) {
+    const c = text[i];
+    if (escaped) { escaped = false; continue; }
+    if (c === '\\') { escaped = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '[') depth++;
+    else if (c === ']') {
+      depth--;
+      if (depth === 0) return text.slice(openIndex, i + 1);
+    }
+    // A runaway scan is a malformed match, not a payload.
+    if (i - openIndex > 2_000_000) return null;
+  }
+  return null;
+}
+
+// Every form-definition field array found in the document's own inline
+// scripts. Returns the richest one: a page may ship several (a saved-answers
+// blob, a template) and the real form is the one with the most questions.
+export function findFormPayloadFields(doc = document) {
+  let best = null;
+  for (const script of doc.querySelectorAll('script:not([src])')) {
+    const text = script.textContent || '';
+    if (!text.includes('"fields"')) continue;
+    FORM_FIELD_ARRAY.lastIndex = 0;
+    let match;
+    while ((match = FORM_FIELD_ARRAY.exec(text))) {
+      const open = match.index + match[0].length - 1;
+      const slice = sliceBalancedArray(text, open);
+      if (!slice) continue;
+      let parsed;
+      try { parsed = JSON.parse(slice); } catch { continue; }
+      if (!looksLikeFormFields(parsed)) continue;
+      if (!best || parsed.length > best.length) best = parsed;
+    }
+  }
+  return best;
+}
+
+// Render the payload as a readable document fragment: a heading per question,
+// its description, and its options as a list. Deliberately prose, never a
+// form — the reader cannot answer a PDF, so controls, ids and refs are all
+// dropped and only the labels survive.
+export function buildFormPayloadTree(fields, doc = document) {
+  const wrap = doc.createElement('section');
+
+  fields.forEach((field) => {
+    const title = (field.title || '').trim();
+    if (!title) return;
+    const props = field.properties || {};
+
+    // A statement is a section divider in the author's own words, so it reads
+    // as a heading; a question reads as one too, one level down.
+    const heading = doc.createElement(field.type === 'statement' ? 'h2' : 'h3');
+    heading.textContent = title;
+    wrap.appendChild(heading);
+
+    const description = (props.description || '').trim();
+    if (description) {
+      const p = doc.createElement('p');
+      p.textContent = description;
+      wrap.appendChild(p);
+    }
+
+    const choices = Array.isArray(props.choices) ? props.choices : [];
+    // `allow_other_choice` and `none_of_the_above` are sibling flags rather
+    // than members of `choices`. Reading the array alone silently drops a real
+    // option from most questions — on one live form, from 12 of 14.
+    const labels = choices.map((c) => (c && c.label ? String(c.label).trim() : '')).filter(Boolean);
+    if (props.none_of_the_above) labels.push('None of the above');
+    if (props.allow_other_choice) labels.push('Other');
+
+    if (labels.length) {
+      const list = doc.createElement('ul');
+      labels.forEach((label) => {
+        const li = doc.createElement('li');
+        li.textContent = label;
+        list.appendChild(li);
+      });
+      wrap.appendChild(list);
+    }
+  });
+
+  return wrap;
+}
+
 // Articulate Storyline/Rise course players draw everything as SVG shapes and
 // text (<tspan> with per-glyph coordinates) inside a canvas-like root
 // (data-model-abs-id attributes, ".slideobject-maskable" wrappers), instead of
@@ -1197,7 +1316,16 @@ export function findContentRoot(doc = document) {
   const explicit = doc.querySelector('article, [role="main"], main');
   const candidates = new Map();
 
-  const paragraphs = Array.from(doc.querySelectorAll('p, pre, td, blockquote, li, h1, h2, h3'));
+  // `legend` earns its place next to the prose tags: form renderers (Typeform
+  // among them) put each question's title in a <legend> inside a <fieldset>
+  // and every answer option in a plain <div>, so a page can carry a whole
+  // document of real reading matter without a single <p>, <li> or <h1>. With
+  // legend missing, such a page scored zero here, elected no root of its own,
+  // and lost the contest to whatever surrounding chrome *did* use prose tags —
+  // a help sidebar's <h2> ended up titling the export. Same failure as the
+  // BODY scoring-candidate bug, one level down: the vocabulary the page
+  // actually uses simply was not on the list.
+  const paragraphs = Array.from(doc.querySelectorAll('p, pre, td, blockquote, li, legend, h1, h2, h3'));
   paragraphs.forEach((node) => {
     const text = (node.textContent || '').trim();
     if (text.length < 25) return;
@@ -1263,7 +1391,11 @@ export function findContentRoot(doc = document) {
 function proseLength(el) {
   if (!el) return 0;
   let total = 0;
-  el.querySelectorAll('p, li, td, blockquote, pre, h1, h2, h3, h4').forEach((node) => {
+  // Mirrors the scoring vocabulary above — `legend` included for the same
+  // reason. A form page whose prose is all <legend> measures as zero here
+  // otherwise, and growRootIfTruncated then judges every candidate against a
+  // page total of nothing.
+  el.querySelectorAll('p, li, td, blockquote, pre, legend, h1, h2, h3, h4').forEach((node) => {
     if (node.closest('nav, header, footer, aside')) return;
     // An <iframe> contributes no text of its own, so nothing here double-counts
     // frame content: the frame's document is measured separately.
@@ -1343,7 +1475,16 @@ export function extractMetadata(doc = document, root = null) {
   // Lesson") or the course name, not the lesson the user is reading. Prefer the
   // content heading, and only fall back to metadata when it is missing or looks
   // like a generic shell label.
-  const contentHeading = root?.querySelector('h1, h2')?.textContent?.replace(/\s+/g, ' ').trim() || '';
+  // Skip headings that belong to page furniture rather than the content. When
+  // the root falls back to <body> — which happens whenever scoring cannot
+  // elect a container of its own — the first h1/h2 in document order is just
+  // as likely to be a help sidebar's or a footer's as the article's, and it
+  // would then title the whole export. A real form page titled itself
+  // "Frequently asked questions about this survey" this way.
+  const headingCandidates = Array.from(root?.querySelectorAll('h1, h2') || []);
+  const contentHeading = headingCandidates
+    .find((h) => !h.closest('aside, nav, footer, header, [role="complementary"], [role="navigation"], [role="contentinfo"]'))
+    ?.textContent?.replace(/\s+/g, ' ').trim() || '';
   const metaTitle =
     meta(doc, ['og:title', 'twitter:title']) ||
     (typeof jsonLd.headline === 'string' ? jsonLd.headline : '') ||
@@ -1479,6 +1620,24 @@ function stripInteractionPrompts(clone) {
 }
 
 function stripAppShell(clone) {
+  // Landmark chrome, but only when the root is the whole <body>. Scoring
+  // already skips nav/header/footer/aside when *electing* a root, so a page
+  // that elects a real container has nothing to strip here; the case this
+  // covers is the `best || explicit || doc.body` fallback, where losing the
+  // contest means the export carries the site's navigation and cookie links
+  // alongside the article. Scoped to BODY on purpose: a page whose content
+  // genuinely lives inside <header> or <aside> still keeps it when that
+  // element was elected on its own merits.
+  if (clone.tagName === 'BODY') {
+    clone.querySelectorAll('nav, aside, footer, [role="navigation"], [role="complementary"], [role="contentinfo"]')
+      .forEach((el) => {
+        // A landmark that holds the bulk of the page is the content, not
+        // chrome — some sites wrap the article itself in <aside>.
+        if (holdsContent(el) && (el.textContent || '').trim().length > 400) return;
+        el.remove();
+      });
+  }
+
   APP_SHELL_SELECTORS.forEach((selector) => {
     let nodes;
     try {
@@ -1578,7 +1737,12 @@ function stripDecorativeSvg(clone, sourceRoot) {
 // display:none. A caption like "Numbered divider" or "Slide 3 of 8" is
 // meant to be *announced*, not *read* — it has no place in an exported
 // document, which is a visual medium like the screen it was hidden from.
-const SCREEN_READER_ONLY = /visually-?hidden|sr-only|screen-reader-only|visuallyhidden|a11y-hidden/i;
+// `*-hint` covers announcement-only labels that are not styled with any of the
+// conventional visually-hidden class names: a real form rendered each answer's
+// letter badge as <span><div class="choice-key-hint">Key</div>A</span>, so the
+// exported option read "KeyA Writing OpenAPI…". The live-box cross-check in
+// stripScreenReaderOnly is what keeps this from eating a visible hint.
+const SCREEN_READER_ONLY = /visually-?hidden|sr-only|screen-reader-only|visuallyhidden|a11y-hidden|(^|[-_ ])key-hint([-_ ]|$)/i;
 
 function stripScreenReaderOnly(clone, sourceRoot) {
   const liveNodes = sourceRoot ? [sourceRoot, ...sourceRoot.querySelectorAll('*')] : null;
@@ -1828,6 +1992,26 @@ export function buildCleanTree(root, {
   stripAppShell(clone);
   if (!keepInteractionPrompts) stripInteractionPrompts(clone);
 
+  // Answer options are content, even though the markup is a control. Form
+  // renderers (Typeform among them) emit each choice as
+  // <button role="checkbox"> or role="radio" holding the option's text, so the
+  // blanket <button> strip below deleted every answer and left the export with
+  // a question, "Choose as many as you like", and nothing under it.
+  //
+  // Unwrap rather than keep: the reader wants the label, not a control they
+  // cannot operate on paper. Gated on the checkbox/radio roles specifically —
+  // a plain <button> (Continue, Submit, a nav arrow) carries no answer and is
+  // still stripped. The checked state is pinned to an attribute for the same
+  // reason as <input> below: cloneNode does not carry the live property.
+  clone.querySelectorAll('button[role="checkbox"], button[role="radio"]').forEach((el) => {
+    const label = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!label) { el.remove(); return; }
+    const li = el.ownerDocument.createElement('li');
+    if (el.getAttribute('aria-checked') === 'true') li.setAttribute('data-checked', 'true');
+    while (el.firstChild) li.appendChild(el.firstChild);
+    el.replaceWith(li);
+  });
+
   clone.querySelectorAll(STRIP_TAGS).forEach((el) => el.remove());
   clone.querySelectorAll(STRIP_ROLES).forEach((el) => el.remove());
 
@@ -1959,14 +2143,27 @@ export function buildCleanTree(root, {
   // `li` matters as much as the rest: carousel pagination dots are often list
   // items whose visible number comes from CSS, so they carry no text and would
   // otherwise export as a run of bare "- " bullets.
+  // Headings are swept on the same terms as the rest: an empty <h2> is not a
+  // heading, it is a gap where a title should be. Text is measured with the
+  // no-break space folded to a plain one — `&nbsp;`-only blocks are common in
+  // CMS output and are not caught by trim(), which treats U+00A0 as content.
   let pass = 0;
   while (pass++ < 3) {
     let removed = 0;
-    clone.querySelectorAll('div, span, section, p, li, dd, dt, td, th').forEach((el) => {
+    clone.querySelectorAll('div, span, section, p, li, dd, dt, td, th, h1, h2, h3, h4, h5, h6').forEach((el) => {
       if (el.children.length) return;
-      if ((el.textContent || '').trim()) return;
+      if ((el.textContent || '').replace(/ /g, ' ').trim()) return;
       if (el.querySelector('img, video, figure')) return;
       el.remove();
+      removed++;
+    });
+
+    // A row whose cells were all swept prints as a blank stripe across the
+    // table. Removed after the cell pass above, so a row only qualifies once
+    // its own empties are gone.
+    clone.querySelectorAll('tr').forEach((row) => {
+      if (row.children.length) return;
+      row.remove();
       removed++;
     });
 
@@ -2174,6 +2371,10 @@ export async function extractDocument({
   // live page, so it is a deliberate choice rather than something that always
   // happens.
   interactive = 'expand',
+  // Read a form definition out of the page's own scripts when the renderer
+  // mounts only some of its questions. Independent of `interactive`: it
+  // clicks nothing, so it is not expansion.
+  readFormPayload = true,
   onProgress,
 } = {}) {
   const styles = new StyleManager();
@@ -2296,6 +2497,40 @@ export async function extractDocument({
     const faithfulTree = buildCleanTree(root, {
       ...common, faithful: true, harvested, sourceRoot: root,
     });
+
+    // Questions a virtualised form renderer never mounted live in its payload,
+    // not the DOM, so this is a parse rather than a reveal or a click.
+    //
+    // Book only, like the widget harvesters. Nothing is clicked and nothing is
+    // submitted, so this is cheap and safe — but cheapness is not the test.
+    // Article means "the page as it stands": the questions this recovers are
+    // ones the reader has not reached and the renderer has never shown, so
+    // putting them in an Article capture makes it a different document from
+    // the one on screen. That the data was free to obtain does not make it
+    // part of the current page.
+    //
+    // `readFormPayload` additionally turns it off for a Book capture that
+    // should stay with what the renderer actually mounted.
+    //
+    // Replaces the tree instead of appending to it: the mounted questions are
+    // a subset of the payload, so appending would print the current question
+    // twice. Only swap when the payload is genuinely richer, so a page whose
+    // form is fully mounted keeps its real DOM (with the layout and images
+    // that come with it).
+    if (expandAll && readFormPayload) {
+      try {
+        const fields = findFormPayloadFields(document);
+        if (fields) {
+          const payloadTree = buildFormPayloadTree(fields, tree.ownerDocument);
+          const payloadProse = proseLength(payloadTree);
+          if (payloadProse > proseLength(tree) * 1.2) {
+            tree.replaceChildren(...payloadTree.childNodes);
+            faithfulTree.replaceChildren(
+              ...buildFormPayloadTree(fields, faithfulTree.ownerDocument).childNodes);
+          }
+        }
+      } catch {}
+    }
 
     // Report what the filter kept, so the UI can offer to include everything.
     const totalImages = root.querySelectorAll('img').length;

@@ -53,6 +53,7 @@ async function loadOptions() {
     state.options.keepImages = settings.keepImages;
     state.options.onlySignificantImages = settings.onlySignificantImages;
     state.options.keepInteractionPrompts = settings.keepInteractionPrompts;
+    state.options.readFormPayload = settings.readFormPayload;
   } catch {}
 
   try {
@@ -358,6 +359,7 @@ async function extractFromSourceTab() {
     keepImages: state.options.keepImages,
     onlySignificantImages: state.options.onlySignificantImages,
     keepInteractionPrompts: state.options.keepInteractionPrompts,
+    readFormPayload: state.options.readFormPayload,
     interactive: state.options.docType === 'article' ? 'current' : 'expand',
   };
 

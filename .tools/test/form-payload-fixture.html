@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>State of the Market Report 2026</title>
+<style>
+  html, body { height: 100%; overflow: hidden; margin: 0; }
+  .block-wrap[inert] { opacity: 0; }
+</style>
+</head>
+<body>
+
+<!-- Reproduces a virtualised form renderer (confirmed against a live
+     apidays.typeform.com form). Only a rolling window of blocks is ever
+     mounted: the reader advances with one control and the renderer swaps the
+     DOM. The remaining questions exist ONLY in the form-definition payload
+     the page shipped to the browser — no amount of DOM walking reaches them,
+     which is what separates this from every other widget shape in extract.js:
+
+       tabs / steppers / flashcards  — panels hidden in the DOM, need a click
+       hidden+inert carousels        — slides present in the DOM, need a reveal
+       SVG sliders                   — injected on click
+       THIS                          — not in the DOM at all, needs a parse
+
+     Book must read the payload rather than click, because advancing this
+     widget submits an answer: TAB_UNSAFE forbids clicking it and is right to.
+
+     Two questions are mounted below; the other three exist only in the JSON.
+     An extractor that walks the DOM finds 2 and silently loses 3. -->
+<main>
+  <div class="block-list">
+    <div class="block-wrap">
+      <fieldset data-qa-block="true">
+        <legend>Do you use AI for any of the following API-related tasks?</legend>
+        <div data-qa="checkboxlist">
+          <button role="checkbox" aria-checked="false"><span>Writing OpenAPI, Async or other API descriptions</span></button>
+          <button role="checkbox" aria-checked="false"><span>Generating API documentation and reference material</span></button>
+        </div>
+      </fieldset>
+    </div>
+  </div>
+
+  <div class="block-list">
+    <div class="block-wrap" inert>
+      <fieldset data-qa-block="true">
+        <legend>How reliable are you finding the results from AI in your work?</legend>
+      </fieldset>
+    </div>
+  </div>
+
+  <button class="nav-continue" type="submit">Continue</button>
+</main>
+
+<!-- The form definition the renderer works from. Unmarked inline script with
+     no id and no type attribute, exactly as the live page ships it, so it can
+     only be found by the shape of its contents. -->
+<script>
+window.__FORM_BOOTSTRAP__ = {"form":{"id":"apiecon2026","title":"State of the Market Report 2026","fields":[
+  {"id":"f1","ref":"r1","type":"statement","title":"Our first set of questions are about AI","properties":{"description":"We start with productivity and reliability."}},
+  {"id":"f2","ref":"r2","type":"multiple_choice","title":"Do you use AI for any of the following API-related tasks?","properties":{"description":"If you are unsure, just answer for you rather than your organisation.","allow_multiple_selection":true,"allow_other_choice":true,"choices":[{"id":"c1","ref":"cr1","label":"Writing OpenAPI, Async or other API descriptions"},{"id":"c2","ref":"cr2","label":"Generating API documentation and reference material"},{"id":"c3","ref":"cr3","label":"API design review such as an AI linter checking for risks"}]}},
+  {"id":"f3","ref":"r3","type":"opinion_scale","title":"How reliable are you finding the results from AI in your work?","properties":{"steps":5}},
+  {"id":"f4","ref":"r4","type":"multiple_choice","title":"Does your organisation provide you with any of the following guidance?","properties":{"allow_other_choice":false,"choices":[{"id":"c4","ref":"cr4","label":"Policy or guidelines on when to use AI and when not to"},{"id":"c5","ref":"cr5","label":"How to assess security risks with AI usage"}]}},
+  {"id":"f5","ref":"r5","type":"multiple_choice","title":"What is your role?","properties":{"allow_other_choice":false,"choices":[{"id":"c6","ref":"cr6","label":"Developer, engineer, or similar"},{"id":"c7","ref":"cr7","label":"Solution architect or team leader"}]}}
+]}};
+</script>
+
+</body>
+</html>

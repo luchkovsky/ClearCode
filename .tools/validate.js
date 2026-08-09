@@ -416,6 +416,32 @@ async function runBrowserTests() {
       fail('hidden+inert carousel fixture missing: test/hidden-inert-carousel-fixture.html');
     }
 
+    const inertOpacityFixture = path.join(TEST_ROOT, 'test', 'inert-opacity-fixture.html');
+    if (fs.existsSync(inertOpacityFixture)) {
+      assertInertOpacityBlocks(
+        await extractViaCdp(await waitForTarget(port), inertOpacityFixture, false, 'expand'),
+        await extractViaCdp(await waitForTarget(port), inertOpacityFixture, false, 'current'));
+    } else {
+      fail('inert+opacity fixture missing: test/inert-opacity-fixture.html');
+    }
+
+    const formPayloadFixture = path.join(TEST_ROOT, 'test', 'form-payload-fixture.html');
+    if (fs.existsSync(formPayloadFixture)) {
+      assertFormPayload(
+        await extractViaCdp(await waitForTarget(port), formPayloadFixture, false, 'expand'),
+        await extractViaCdp(await waitForTarget(port), formPayloadFixture, false, 'current'),
+        await extractViaCdp(await waitForTarget(port), formPayloadFixture, false, 'expand', false));
+    } else {
+      fail('form payload fixture missing: test/form-payload-fixture.html');
+    }
+
+    const emptyBlockFixture = path.join(TEST_ROOT, 'test', 'compact-fixture.html');
+    if (fs.existsSync(emptyBlockFixture)) {
+      assertEmptyBlocks(await extractViaCdp(await waitForTarget(port), emptyBlockFixture, false, 'current'));
+    } else {
+      fail('empty-block fixture missing: test/compact-fixture.html');
+    }
+
     const screenReaderFixture = path.join(TEST_ROOT, 'test', 'screen-reader-fixture.html');
     if (fs.existsSync(screenReaderFixture)) {
       assertScreenReaderOnlyStripped(await extractViaCdp(await waitForTarget(port), screenReaderFixture));
@@ -478,7 +504,7 @@ async function waitForTarget(port, timeoutMs = 15000) {
 }
 
 // Minimal CDP client over the built-in WebSocket (Node 22+).
-async function extractViaCdp(wsUrl, fixturePath, checkRestore = false, interactive = 'expand') {
+async function extractViaCdp(wsUrl, fixturePath, checkRestore = false, interactive = 'expand', readFormPayload = true) {
   const ws = new WebSocket(wsUrl);
   let nextId = 1;
   const pending = new Map();
@@ -527,7 +553,7 @@ async function extractViaCdp(wsUrl, fixturePath, checkRestore = false, interacti
           select: document.querySelector('.no-copy') && getComputedStyle(document.querySelector('.no-copy')).userSelect,
         } : null;
 
-        const c = await window.__clearCopyExtract({ keepImages: true, onlySignificantImages: true, interactive: '${interactive}' });
+        const c = await window.__clearCopyExtract({ keepImages: true, onlySignificantImages: true, interactive: '${interactive}', readFormPayload: ${readFormPayload} });
 
         const after = ${checkRestore} ? {
           shield: document.querySelector('.shield') && getComputedStyle(document.querySelector('.shield')).display,
@@ -1269,6 +1295,221 @@ function assertHiddenInertCarousel(bookRaw, articleRaw) {
     'text before and after the carousel survives in Book mode');
   assert(article.md.includes('security measures to consider') && article.md.includes('disabling debug headers'),
     'text before and after the carousel survives in Article mode');
+}
+
+// A virtualised question feed (Typeform and friends) keeps a rolling window of
+// blocks mounted and fades the off-screen neighbours out with `inert` +
+// opacity:0 — no `hidden` attribute, and each block an only child of its own
+// wrapper. The older hidden+inert carousel pass misses this twice over (its
+// selector needs both attributes, its shape test needs same-class siblings),
+// so a real form exported as one question out of the three sitting in the DOM.
+// The text costs nothing to read, so Article must keep all of it.
+function assertInertOpacityBlocks(bookRaw, articleRaw) {
+  const book = JSON.parse(bookRaw);
+  const article = JSON.parse(articleRaw);
+
+  section('Behaviour — blocks hidden via inert + opacity:0');
+
+  const blocks = [
+    'Our first set of questions are about AI',
+    'Do you use AI for any of the following API-related tasks?',
+    'Does your organisation provide you with any of the following guidance?',
+  ];
+
+  const missingInArticle = blocks.filter((b) => !article.md.includes(b));
+  assert(missingInArticle.length === 0,
+    'Article keeps every inert+opacity:0 block (already free to read)',
+    missingInArticle.length ? `missing: ${missingInArticle.join(' | ')}` : '');
+
+  const missingInBook = blocks.filter((b) => !book.md.includes(b));
+  assert(missingInBook.length === 0, 'Book keeps every inert+opacity:0 block',
+    missingInBook.length ? `missing: ${missingInBook.join(' | ')}` : '');
+
+  // The answer options are the part a reader actually wants, and the renderer
+  // emits each one as a <button role="checkbox">. STRIP_TAGS removes every
+  // <button> as interactive UI, so a real form exported as a question with no
+  // answers under it — "Choose as many as you like" and then nothing.
+  const options = [
+    'Writing OpenAPI, Async or other API descriptions',
+    'Generating API documentation and reference material',
+    'API design review such as an AI linter checking for risks',
+  ];
+  const missingOptions = options.filter((o) => !article.md.includes(o));
+  assert(missingOptions.length === 0,
+    'answer options marked up as <button role="checkbox"> survive',
+    missingOptions.length ? `missing: ${missingOptions.join(' | ')}` : '');
+
+  assert(article.md.includes('How to assess security risks with AI usage'),
+    'options inside a faded block survive in Article mode');
+
+  // Keeping answer buttons must not degrade into keeping every button: a
+  // plain navigation control is still page furniture.
+  assert(!article.md.includes('Continue to the next question'),
+    'a plain navigation button is still stripped');
+
+  // NOTE: the announcement-only "Key" prefix on each answer's letter badge
+  // (SCREEN_READER_ONLY's `key-hint` term) is deliberately NOT asserted here.
+  // The badge is dropped from this fixture's output before the hint can ever
+  // reach the Markdown, so any assertion on it passes with the fix reverted —
+  // i.e. it would test nothing. The leak was confirmed by hand against the
+  // live renderer ("KeyAWriting OpenAPI…" → "AWriting OpenAPI…"); reproducing
+  // it here needs a fixture that keeps the badge, which is worth adding when
+  // the letter-badge shape itself is next touched.
+
+  assert(article.md.includes('anonymous and will be used in research reports'),
+    'text after the block feed survives in Article mode');
+
+  // The real cost of scoring zero for <legend>/<div> content: the only
+  // prose-bearing heading on the page belongs to the help sidebar, so it wins
+  // the content-root contest and the document is titled after the chrome
+  // instead of the form. The form's own title must win.
+  assert(!/^title:.*Frequently asked questions/m.test(article.md),
+    'document is not titled after the help sidebar',
+    `title line: ${(article.md.match(/^title:.*$/m) || ['(none)'])[0]}`);
+
+  assert(/^title:.*State of the Market Report/m.test(article.md),
+    'document takes its title from the form, not the surrounding chrome',
+    `title line: ${(article.md.match(/^title:.*$/m) || ['(none)'])[0]}`);
+
+  // Electing <body> as the root (the `best || explicit || doc.body` fallback)
+  // drags in every scrap of page furniture alongside the form.
+  assert(!article.md.includes('Cookies'),
+    'inert site chrome is not dragged in when the root falls back to body');
+}
+
+// A virtualised form renderer mounts only a rolling window of questions and
+// keeps the rest in the form-definition payload it shipped to the browser.
+// Nothing in the DOM reaches those questions — not a reveal, not a click — so
+// Book reads the payload instead. Clicking is not merely unnecessary here but
+// unsafe: advancing the widget submits a real answer, which TAB_UNSAFE
+// forbids. Article stays a snapshot of what is mounted.
+function assertFormPayload(bookRaw, articleRaw, disabledRaw) {
+  const book = JSON.parse(bookRaw);
+  const article = JSON.parse(articleRaw);
+  const disabled = JSON.parse(disabledRaw);
+
+  section('Behaviour — questions held only in a form payload');
+
+  // Mounted in the DOM: both modes must have these.
+  const mounted = [
+    'Do you use AI for any of the following API-related tasks?',
+    'How reliable are you finding the results from AI in your work?',
+  ];
+  const missingMounted = mounted.filter((q) => !article.md.includes(q));
+  assert(missingMounted.length === 0, 'Article keeps the questions mounted in the DOM',
+    missingMounted.length ? `missing: ${missingMounted.join(' | ')}` : '');
+
+  // The options belonging to a mounted question are on screen, so Article
+  // keeps them — the earlier <button role="checkbox"> fix, still holding on a
+  // form page.
+  assert(article.md.includes('Writing OpenAPI, Async or other API descriptions'),
+    'Article keeps the answer options of a mounted question');
+
+  // Present ONLY in the payload: Book must recover these, and they are the
+  // whole point — a DOM walk finds two questions and loses three.
+  const payloadOnly = [
+    'Our first set of questions are about AI',
+    'Does your organisation provide you with any of the following guidance?',
+    'What is your role?',
+  ];
+  const missingInBook = payloadOnly.filter((q) => !book.md.includes(q));
+  assert(missingInBook.length === 0, 'Book recovers questions that exist only in the payload',
+    missingInBook.length ? `missing: ${missingInBook.join(' | ')}` : '');
+
+  // Answer choices come with them, including ones whose question never mounted.
+  const choices = [
+    'API design review such as an AI linter checking for risks',
+    'How to assess security risks with AI usage',
+    'Solution architect or team leader',
+  ];
+  const missingChoices = choices.filter((c) => !book.md.includes(c));
+  assert(missingChoices.length === 0, 'Book recovers the answer choices from the payload',
+    missingChoices.length ? `missing: ${missingChoices.join(' | ')}` : '');
+
+  // `allow_other_choice` is a sibling flag, not a member of `choices`: reading
+  // the array alone silently drops a real option from most questions.
+  assert(/(^|\n).*Other\s*$/m.test(book.md),
+    'an allow_other_choice question gains its "Other" option');
+
+  // Field descriptions are a separate key from the title; a parser that reads
+  // only titles loses the clarifying line under each question.
+  assert(book.md.includes('If you are unsure, just answer for you'),
+    'field descriptions survive alongside their question');
+
+  // Article must NOT recover them. That the payload is free to read does not
+  // make it part of the current page: these are questions the reader has not
+  // reached and the renderer has never shown, so including them would make an
+  // Article capture a different document from the one on screen.
+  const leaked = payloadOnly.filter((q) => article.md.includes(q));
+  assert(leaked.length === 0, 'Article does not pull in unmounted payload questions',
+    leaked.length ? `leaked: ${leaked.join(' | ')}` : '');
+
+  // …and the two modes therefore differ on a form page. If these ever converge
+  // the gating has been lost, whichever direction it broke in.
+  assert(book.md.length > article.md.length * 1.2,
+    'Book captures materially more of a form than Article',
+    `article ${article.md.length} vs book ${book.md.length} chars`);
+
+  // The payload is a data island, never prose: none of its plumbing may reach
+  // the document.
+  assert(!book.md.includes('__FORM_BOOTSTRAP__') && !/"ref"\s*:/.test(book.md),
+    'payload plumbing (refs, ids, bootstrap name) never reaches the document');
+
+  // readFormPayload:false must genuinely turn the pass off, or the setting is
+  // decorative. The capture falls back to what the renderer mounted.
+  const stillThere = payloadOnly.filter((q) => disabled.md.includes(q));
+  assert(stillThere.length === 0, 'readFormPayload:false falls back to the mounted DOM',
+    stillThere.length ? `still present: ${stillThere.join(' | ')}` : '');
+
+  assert(disabled.md.includes('Do you use AI for any of the following API-related tasks?'),
+    'readFormPayload:false still captures the mounted questions');
+}
+
+// Blocks that render as nothing but still occupy a slot in the document. The
+// Markdown side already came out clean — blocks.js drops these on its own —
+// but the HTML the PDF is printed from kept an empty <h2> (a gap where a
+// title should be) and an emptied <tr> (a blank stripe across the table),
+// because the sweep in buildCleanTree skips headings and rows.
+//
+// Asserted on `html`, not `md`: this is a PDF-side defect, and asserting it
+// on the Markdown would pass while testing nothing.
+function assertEmptyBlocks(raw) {
+  const { md, html } = JSON.parse(raw);
+
+  section('Behaviour — empty blocks dropped from the printed tree');
+
+  // Real content is never at risk.
+  const keep = [
+    'A real opening paragraph that must always survive',
+    'A second real paragraph, after the empty blocks',
+    'A closing paragraph that must survive in both modes',
+    'First genuine option in the list',
+    'Second genuine option in the list',
+  ];
+  const missing = keep.filter((t) => !md.includes(t));
+  assert(missing.length === 0, 'every real block survives',
+    missing.length ? `missing: ${missing.join(' | ')}` : '');
+
+  assert(md.includes('EMEA') && md.includes('62%'),
+    'a table with real rows survives');
+
+  // The two real defects.
+  assert(!/<h[1-6][^>]*>\s*<\/h[1-6]>/.test(html),
+    'an empty heading is dropped from the printed tree',
+    (html.match(/<h[1-6][^>]*>\s*<\/h[1-6]>/) || [''])[0]);
+
+  assert(!/<tr[^>]*>\s*<\/tr>/.test(html),
+    'a row left with no cells is dropped from the printed tree',
+    (html.match(/<tr[^>]*>\s*<\/tr>/) || [''])[0]);
+
+  // A header row plus one body row: the blank third row must be gone without
+  // taking a real one with it.
+  const rows = (html.match(/<tr[^>]*>/g) || []).length;
+  assert(rows === 2, 'exactly the two real table rows remain', `rows: ${rows}`);
+
+  // Markdown-side guards, so a regression on either path is caught.
+  assert(!/^-\s*$/m.test(md), 'no bare "- " bullet in the Markdown');
+  assert(!/^#{1,6}\s*$/m.test(md), 'no empty heading in the Markdown');
 }
 
 // "Visually hidden" accessibility text (position:absolute + clip, not

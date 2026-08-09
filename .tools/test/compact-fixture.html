@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Compact mode</title>
+</head>
+<body>
+
+<!-- Blocks that render as nothing but still occupy a slot in the exported
+     document. The existing sweep in buildCleanTree only collapses *leaf*
+     empties (an element with no children and no text), so everything below
+     survives it: a wrapper whose only content is another empty wrapper still
+     reports children.length > 0 and is kept, printing as dead vertical space.
+
+     Compact mode removes these. It is off by default because an empty block
+     can be deliberate whitespace in a faithful capture — the setting is the
+     reader's call, not ours. -->
+<article>
+  <h1>Compact mode</h1>
+
+  <p>A real opening paragraph that must always survive, in both compact and normal mode.</p>
+
+  <!-- 1. Nested wrappers containing nothing at all. -->
+  <div class="spacer"><div class="inner"><span></span></div></div>
+
+  <!-- 2. Whitespace-only paragraph: not empty by textContent, but renders as
+          a blank line. -->
+  <p>   </p>
+
+  <!-- 3. Non-breaking space only. Common in CMS output, and invisible to a
+          plain .trim() check because &nbsp; is not ASCII whitespace. -->
+  <p>&nbsp;</p>
+
+  <!-- 4. A heading with no text: prints as a gap where a title should be. -->
+  <h2></h2>
+
+  <p>A second real paragraph, after the empty blocks, which must also survive.</p>
+
+  <!-- 5. A table row whose every cell is blank. -->
+  <table>
+    <tr><th>Region</th><th>Adoption</th></tr>
+    <tr><td>EMEA</td><td>62%</td></tr>
+    <tr><td>  </td><td>&nbsp;</td></tr>
+  </table>
+
+  <!-- 6. A list where some items are blank but others are real: the real ones
+          must survive, so this cannot be handled by dropping whole lists. -->
+  <ul>
+    <li>First genuine option in the list</li>
+    <li>  </li>
+    <li>Second genuine option in the list</li>
+  </ul>
+
+  <!-- 7. A wrapper holding only a decorative image must NOT be dropped: an
+          image is content even with no text beside it. -->
+  <div class="figure-wrap"><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="A meaningful chart of adoption by region" width="400" height="300"></div>
+
+  <p>A closing paragraph that must survive in both modes.</p>
+</article>
+
+</body>
+</html>

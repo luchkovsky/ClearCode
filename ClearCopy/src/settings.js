@@ -12,6 +12,14 @@ export const DEFAULT_SETTINGS = {
   onlySignificantImages: true,
   keepInteractionPrompts: false,
 
+  // Book only, like every other way Book reaches past the current screen:
+  // recover the questions a virtualised form renderer never mounted by reading
+  // the form definition the page shipped to the browser. Without it a
+  // 22-question survey exports as the one question on screen. Article
+  // deliberately does not do this — it captures the page as it stands, and
+  // questions the reader has not reached are not on it.
+  readFormPayload: true,
+
   // Behaviour after a capture.
   notifyOnCapture: true,      // brief badge confirmation
   openPreviewAfterAdd: false, // jump straight to the preview
@@ -65,5 +73,6 @@ export function extractionOptions(settings) {
     keepImages: settings.keepImages,
     onlySignificantImages: settings.onlySignificantImages,
     keepInteractionPrompts: settings.keepInteractionPrompts,
+    readFormPayload: settings.readFormPayload,
   };
 }

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>State of the Market Report 2026</title>
+<style>
+  /* The renderer keeps a rolling window of blocks mounted and fades the
+     off-screen neighbours out. Nothing is display:none and nothing carries
+     the `hidden` attribute — invisibility is opacity alone. */
+  .block-wrap { display: grid; }
+  .block-wrap[inert] { opacity: 0; }
+  /* Announcement-only text: present for screen readers, no box on screen. */
+  .choice-key-hint { position: absolute; width: 1px; height: 1px; overflow: hidden; }
+</style>
+</head>
+<body>
+
+<!-- Reproduces a Typeform-style form renderer (confirmed against a live
+     apidays.typeform.com form, which exported as a single question out of the
+     three mounted in the DOM).
+
+     The load-bearing detail is the MARKUP VOCABULARY, not the hiding. Every
+     question title is a <legend> inside a <fieldset> and every answer option
+     is a <div>: the form itself contains not one <p>, <li> or <h1>-<h3>. The
+     surrounding site chrome — the help sidebar and the footer below — *does*
+     use <p> and <li>. So a content-root scorer that only counts
+     `p, pre, td, blockquote, li, h1, h2, h3` scores zero for the real content
+     and elects the CHROME instead, exporting a help sidebar and dropping the
+     entire form. Same failure shape as the `BODY` scoring-candidate bug, one
+     level down: the vocabulary the page uses simply is not on the list.
+
+     Do NOT "simplify" this fixture by wrapping the questions in <p> tags, and
+     do NOT delete the sidebar/footer: without prose-bearing competition the
+     `best || explicit || doc.body` fallback quietly keeps the form anyway and
+     the assertion passes while testing nothing.
+
+     The blocks are additionally marked `inert` with opacity:0 (the off-screen
+     neighbours of a virtualised feed) to keep that shape covered too, but
+     those attributes are not what breaks extraction here. -->
+<main>
+  <div class="page-title">State of the Market Report 2026</div>
+
+  <div class="block-list">
+    <div class="block-wrap" inert>
+      <fieldset data-qa-block="true">
+        <legend>Our first set of questions are about AI, because we are sure you want to talk about that</legend>
+        <div class="block-description">We start with productivity and how reliable you find the results in your day to day work.</div>
+      </fieldset>
+    </div>
+  </div>
+
+  <div class="block-list">
+    <div class="block-wrap">
+      <fieldset data-qa-block="true">
+        <legend>Do you use AI for any of the following API-related tasks?</legend>
+        <div class="block-description">If you are unsure, just answer for you rather than your organisation or team.</div>
+        <!-- The options are <button role="checkbox">, exactly as the live
+             renderer emits them. STRIP_TAGS removes every <button> as
+             interactive UI, which silently deleted the answers and left the
+             export with a question and no options — the reported bug. -->
+        <div data-qa="checkboxlist">
+          <!-- The letter badge carries an announcement-only "Key" prefix that
+               is absolutely positioned out of view. It is in textContent but
+               not innerText, so the flattened option read "KeyAWriting
+               OpenAPI…" — matching the live renderer exactly. The badge and
+               the label must stay in ONE text run (no block-level element
+               between them), or the leak cannot reproduce. -->
+          <button role="checkbox" aria-checked="false"><span class="choice-key-inner"><span class="choice-key-hint">Key</span>A</span><span>Writing OpenAPI, Async or other API descriptions</span></button>
+          <button role="checkbox" aria-checked="false"><span>B</span><span>Generating API documentation and reference material</span></button>
+          <button role="checkbox" aria-checked="false"><span>C</span><span>API design review such as an AI linter checking for risks</span></button>
+        </div>
+      </fieldset>
+    </div>
+  </div>
+
+  <div class="block-list">
+    <div class="block-wrap" inert>
+      <fieldset data-qa-block="true">
+        <legend>Does your organisation provide you with any of the following guidance?</legend>
+        <div class="block-description">Select every kind of support your team is given when adopting these tools.</div>
+        <div data-qa="checkboxlist">
+          <button role="checkbox" aria-checked="false"><span>A</span><span>Policy or guidelines on when to use AI and when not to</span></button>
+          <button role="checkbox" aria-checked="false"><span>B</span><span>How to assess security risks with AI usage</span></button>
+        </div>
+      </fieldset>
+    </div>
+  </div>
+
+  <!-- A genuine control with no answer semantics. Keeping answer buttons must
+       not start keeping navigation buttons: this one has no role="checkbox"/
+       "radio" and must still be stripped. -->
+  <button class="submit-nav" type="submit">Continue to the next question</button>
+
+  <div class="closing">All answers are anonymous and will be used in research reports later this year.</div>
+</main>
+
+<!-- Prose-bearing chrome. This is what wins the content-root contest when the
+     form's own <legend>/<div> vocabulary scores zero. -->
+<aside class="help-panel">
+  <h2>Frequently asked questions about this survey</h2>
+  <p>Responses are collected anonymously and aggregated before any analysis begins, so no individual answer is ever attributed back to a named respondent in the published report.</p>
+  <p>The survey typically takes about four minutes to complete, and your progress is saved automatically as you move between the questions in the form.</p>
+  <ul>
+    <li>Answers may be revised at any point before the final submission step.</li>
+    <li>Aggregated findings are published as a free report later in the year.</li>
+    <li>Contact the research team if you would like your response withdrawn.</li>
+  </ul>
+</aside>
+
+<footer>
+  <p>The apidays research programme runs an annual state of the market study covering the API economy, developer tooling, and the adoption of AI across engineering organisations worldwide.</p>
+</footer>
+
+<!-- Guard against the fix over-reaching. A modal backdrop marks the page
+     behind it `inert` too; that content is furniture, not prose, and must not
+     be dragged into the export just because it shares the attribute. -->
+<div class="site-chrome" inert>
+  <nav><a href="/privacy">Privacy</a> <a href="/cookies">Cookies</a></nav>
+</div>
+
+</body>
+</html>

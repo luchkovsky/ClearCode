@@ -4,7 +4,7 @@ import { loadCollection, clearCollection } from './src/collection.js';
 const $ = (id) => document.getElementById(id);
 
 const CHECKBOXES = [
-  'keepImages', 'onlySignificantImages', 'keepInteractionPrompts',
+  'keepImages', 'onlySignificantImages', 'keepInteractionPrompts', 'readFormPayload',
   'notifyOnCapture', 'openPreviewAfterAdd',
 ];
 const SELECTS = ['defaultDocType', 'defaultStyle'];
