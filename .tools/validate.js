@@ -442,6 +442,13 @@ async function runBrowserTests() {
       fail('empty-block fixture missing: test/compact-fixture.html');
     }
 
+    const lessonTreeFixture = path.join(TEST_ROOT, 'test', 'lesson-tree-fixture.html');
+    if (fs.existsSync(lessonTreeFixture)) {
+      assertCourseTreeWalk(await walkCourseViaCdp(await waitForTarget(port), lessonTreeFixture));
+    } else {
+      fail('lesson tree fixture missing: test/lesson-tree-fixture.html');
+    }
+
     const screenReaderFixture = path.join(TEST_ROOT, 'test', 'screen-reader-fixture.html');
     if (fs.existsSync(screenReaderFixture)) {
       assertScreenReaderOnlyStripped(await extractViaCdp(await waitForTarget(port), screenReaderFixture));
@@ -581,6 +588,111 @@ async function extractViaCdp(wsUrl, fixturePath, checkRestore = false, interacti
 // bypassing extraction entirely — this is the whole-course walk's link
 // discovery in isolation, the same helper Book mode calls before navigating
 // the tab anywhere.
+// Drives a whole-course walk against a fixture whose left menu is an ARIA
+// tree with client-side routing. Returns the merged book plus a trace of what
+// the walk visited, so the assertions can check both the document and the
+// navigation behaviour that produced it.
+async function walkCourseViaCdp(wsUrl, fixturePath) {
+  const ws = new WebSocket(wsUrl);
+  let nextId = 1;
+  const pending = new Map();
+
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve, { once: true });
+    ws.addEventListener('error', () => reject(new Error('CDP socket failed')), { once: true });
+  });
+
+  ws.addEventListener('message', (event) => {
+    const msg = JSON.parse(event.data);
+    const entry = pending.get(msg.id);
+    if (!entry) return;
+    pending.delete(msg.id);
+    msg.error ? entry.reject(new Error(msg.error.message)) : entry.resolve(msg.result);
+  });
+
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+  const evaluate = async (expression) => {
+    const { result, exceptionDetails } = await send('Runtime.evaluate', {
+      expression, awaitPromise: true, returnByValue: true,
+    });
+    if (exceptionDetails) throw new Error(exceptionDetails.exception?.description || 'evaluate failed');
+    return result.value;
+  };
+
+  try {
+    await send('Page.enable');
+    await send('Runtime.enable');
+    await send('Page.navigate', { url: `file://${fixturePath}` });
+    await new Promise((r) => setTimeout(r, 500));
+
+    const bundle = fs.readFileSync(path.join(ROOT, 'src', 'extractor.bundle.js'), 'utf8');
+    await evaluate(bundle);
+
+    // Detect a page reload during the walk: a client-side route must never
+    // unload the document, and a reload here would mean the real player would
+    // have raised Chrome's unsaved-changes prompt instead.
+    await evaluate(`window.__ccWalkProbe = 'alive';
+      window.__ccUnloadFired = false;
+      addEventListener('beforeunload', () => { window.__ccUnloadFired = true; });`);
+
+    // Drive the walk one lesson per call, exactly as the preview does: a real
+    // course returns far too much HTML to come back in a single executeScript
+    // result, so the loop lives in the caller.
+    const walked = await evaluate(`(async () => {
+      const summary = window.__clearCopyLessonTree();
+      const pages = [], visited = [];
+      for (let i = 0; i < summary.titles.length; i++) {
+        const opened = await window.__clearCopyOpenLesson(i);
+        if (!opened || !opened.ok) continue;
+        const content = await window.__clearCopyExtract({ keepImages: false, interactive: 'current' });
+        if (!content || !(content.text || '').trim()) continue;
+        pages.push({ ...content, title: summary.titles[i], order: i });
+        visited.push(summary.titles[i]);
+      }
+      let restored = false;
+      if (summary.openIndex >= 0) {
+        const back = await window.__clearCopyOpenLesson(summary.openIndex);
+        restored = !!(back && back.ok);
+      }
+      return JSON.stringify({ pages, visited, restored, courseTitle: summary.courseTitle });
+    })()`);
+
+    // The walk returns per-lesson results; the preview merges them with
+    // collection.js. That module needs a DOM, so merge in the page.
+    const collectionSrc = fs.readFileSync(path.join(ROOT, 'src', 'collection.js'), 'utf8')
+      .replace(/^\s*import\s+[^;]*?;\s*$/gm, '')
+      .replace(/^export\s+(async\s+function|function|class|const|let|var)/gm, '$1');
+    await evaluate(`(() => { ${collectionSrc}\n window.__ccMerge = mergeCollection; })()`);
+
+    const merged = JSON.parse(await evaluate(`(() => {
+      const w = ${walked};
+      const book = window.__ccMerge(
+        w.pages.map((p, i) => ({ ...p, order: p.order ?? i })),
+        { includeContents: true, pageBreaks: true, title: w.courseTitle || 'Course' });
+      return JSON.stringify({
+        visited: w.visited,
+        restored: w.restored,
+        html: book.html,
+        md: window.__clearCopyToMarkdown({ html: book.html, metadata: { title: w.courseTitle || 'Course' } }),
+      });
+    })()`));
+
+    const probe = await evaluate(`JSON.stringify({
+      survived: window.__ccWalkProbe === 'alive',
+      unloadFired: !!window.__ccUnloadFired,
+      finalUrl: location.href,
+    })`);
+
+    return JSON.stringify({ walked: merged, probe: JSON.parse(probe) });
+  } finally {
+    try { ws.close(); } catch {}
+  }
+}
+
 async function discoverLinksViaCdp(wsUrl, fixturePath) {
   const ws = new WebSocket(wsUrl);
   let nextId = 1;
@@ -1510,6 +1622,68 @@ function assertEmptyBlocks(raw) {
   // Markdown-side guards, so a regression on either path is caught.
   assert(!/^-\s*$/m.test(md), 'no bare "- " bullet in the Markdown');
   assert(!/^#{1,6}\s*$/m.test(md), 'no empty heading in the Markdown');
+}
+
+// A course whose left menu is an ARIA tree, walked lesson by lesson into one
+// book. This is the shape the old collectWholeCourse could not handle and the
+// reason it was reverted does not apply to: navigation here is client-side, so
+// no beforeunload fires and Chrome never raises its unsaved-changes prompt.
+//
+// Two things are load-bearing and easy to lose:
+//   * only LEAF treeitems are lessons — a group row contains other treeitems
+//     and walking it would capture the same page twice;
+//   * TAB_UNSAFE still applies. "Save and exit course" sits in the same tree
+//     wearing the same markup, and following it during a walk can end an
+//     enrollment rather than merely navigating.
+function assertCourseTreeWalk(raw) {
+  const { walked, probe } = JSON.parse(raw);
+  const md = walked.md || '';
+  const visited = walked.visited || [];
+
+  section('Behaviour — whole-course walk over an ARIA lesson tree');
+
+  // Every leaf lesson reached, in menu order.
+  const lessons = ['Introduction', "What you'll learn", 'Assess use-case quality', 'Summary'];
+  const missing = lessons.filter((t) => !visited.includes(t));
+  assert(missing.length === 0, 'every leaf lesson in the tree is visited',
+    missing.length ? `missing: ${missing.join(' | ')}` : `visited: ${visited.join(' | ')}`);
+
+  assert(visited.length === lessons.length,
+    'group rows are not walked as lessons',
+    `visited ${visited.length}: ${visited.join(' | ')}`);
+
+  // The unsafe row must never be followed.
+  assert(!visited.some((t) => /exit/i.test(t)),
+    'an unsafe "Save and exit" row is never followed',
+    `visited: ${visited.join(' | ')}`);
+  assert(!md.includes('Enrollment ended'),
+    'the exit page never reaches the book');
+
+  // The book holds each lesson's body, not just its title.
+  const bodies = [
+    'activation-ready use cases are designed',
+    'evaluate business value and activation readiness',
+    'measurable outcomes, data availability',
+    'checklist you will reuse',
+  ];
+  const missingBodies = bodies.filter((b) => !md.includes(b));
+  assert(missingBodies.length === 0, 'each lesson contributes its own body text',
+    missingBodies.length ? `missing: ${missingBodies.join(' | ')}` : '');
+
+  // It is a book: a table of contents, and the lessons in menu order.
+  assert(/Contents/.test(walked.html || ''), 'the merged document has a table of contents');
+  const order = lessons.map((t) => md.indexOf(t));
+  assert(order.every((n, i) => n >= 0 && (i === 0 || n > order[i - 1])),
+    'lessons appear in menu order', `offsets: ${order.join(', ')}`);
+
+  // The walk must be a client-side route, never a reload — a reload is what
+  // raised the browser prompt that killed this feature the first time.
+  assert(probe.survived && !probe.unloadFired,
+    'walking the tree never unloads the document (no browser prompt)',
+    `survived=${probe.survived} unloadFired=${probe.unloadFired}`);
+
+  // The learner is put back where they started.
+  assert(walked.restored === true, 'the originally open lesson is restored afterwards');
 }
 
 // "Visually hidden" accessibility text (position:absolute + clip, not

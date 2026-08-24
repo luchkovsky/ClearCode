@@ -3,8 +3,8 @@
   // Re-injection is normal (every capture injects again). Skip only when the
   // frame already has *this* version — an older one must be overwritten or its
   // missing entry points fail silently.
-  if (window.__clearCopyApiVersion === 28) return;
-  window.__clearCopyApiVersion = 28;
+  if (window.__clearCopyApiVersion === 30) return;
+  window.__clearCopyApiVersion = 30;
 
 /* ---- debug.js ---- */
 // Debug logging for the injected bundle. Off by default — real users never
@@ -2388,6 +2388,97 @@ function discoverCourseLessonLinks(doc = document) {
   return Array.from(seen, ([url, title]) => ({ url, title }));
 }
 
+// A course whose left menu is an ARIA tree rather than a list of links, walked
+// lesson by lesson into one document.
+//
+// This is the whole-course capture that was removed once before, and the
+// reason it was removed does not apply here. `collectWholeCourse` died because
+// a SCORM player registers `beforeunload` on a live lesson session, so every
+// lesson-to-lesson transition raised Chrome's "changes you made may not be
+// saved" prompt — one manual click per lesson, which defeats the automation,
+// and dismissing it programmatically would override a safeguard the player put
+// there deliberately. A tree like this routes client-side: the document is
+// never unloaded, so no prompt exists to fight. `walkLessonTree` refuses to
+// continue the moment a navigation actually unloads the page, so it can never
+// turn into the thing that was rejected.
+//
+// Only LEAF treeitems are lessons. A group row contains other treeitems and
+// selecting it lands on the same page as its first child, which would capture
+// that lesson twice and title it after the section.
+function findLessonTreeItems(doc = document) {
+  const tree = doc.querySelector('[role="tree"]');
+  if (!tree) return [];
+
+  return Array.from(tree.querySelectorAll('[role="treeitem"]'))
+    .filter((item) => !item.querySelector('[role="treeitem"]'))
+    .map((item) => {
+      // The accessible name carries state the reader does not want in a title
+      // ("Introduction , completed", "… , currently playing").
+      const raw = normalizeSnippet(item.innerText || item.textContent);
+      const title = raw.replace(/\s*,\s*(completed|currently playing|in progress|not started)\s*$/i, '').trim();
+      return { item, title };
+    })
+    .filter(({ title }) => {
+      if (!title) return false;
+      // The same guard the link walk uses: "Save and exit course" wears the
+      // same markup as a lesson, and following it during a walk can end an
+      // enrollment rather than merely navigating.
+      if (TAB_UNSAFE.test(title)) return false;
+      if (NON_READING_PAGE.test(title)) return false;
+      return true;
+    });
+}
+
+// Walking is driven ONE LESSON PER CALL from the preview, not as a single
+// in-page loop that returns everything at once. A course page's extracted HTML
+// runs to hundreds of kilobytes, and both the Reader and Faithful trees are
+// returned; forty of those is well over ten megabytes, which
+// chrome.scripting.executeScript cannot structured-clone in one return. The
+// call fails wholesale and the reader silently gets the ordinary single-page
+// export instead of a book — which is exactly how this first shipped.
+//
+// Keeping the loop in the caller also means progress can be reported per
+// lesson and a walk can be abandoned part-way with the pages so far intact.
+
+// Open one lesson by index and wait for it to render. Returns what happened,
+// never the content — the caller extracts separately.
+async function openLessonByIndex(index, { settleTimeout = 6000 } = {}) {
+  const lessons = findLessonTreeItems(document);
+  if (!lessons.length) return { ok: false, reason: 'no lesson tree' };
+  if (index < 0 || index >= lessons.length) return { ok: false, reason: 'out of range' };
+
+  // A real unload means this platform is not client-side routed after all, and
+  // continuing would raise the browser prompt this feature exists to avoid.
+  let unloaded = false;
+  const onUnload = () => { unloaded = true; };
+  addEventListener('beforeunload', onUnload);
+  try {
+    const { item, title } = lessons[index];
+    try { item.click(); } catch { return { ok: false, reason: 'click failed', title }; }
+    if (unloaded) return { ok: false, reason: 'unloaded', title };
+    await waitForContent({ timeout: settleTimeout });
+    return { ok: !unloaded, unloaded, title, total: lessons.length };
+  } finally {
+    removeEventListener('beforeunload', onUnload);
+  }
+}
+
+// The lesson titles in menu order, plus which one is currently open, so the
+// caller can drive the walk and put the reader back afterwards.
+function lessonTreeSummary(doc = document) {
+  const lessons = findLessonTreeItems(doc);
+  const openIndex = lessons.findIndex(({ item }) =>
+    /currently playing|aria-selected="true"/i.test(
+      `${item.innerText || ''} ${item.outerHTML.slice(0, 200)}`));
+  // The tree's own top row names the course.
+  const first = doc.querySelector('[role="tree"] [role="treeitem"]');
+  const courseTitle = first
+    ? normalizeSnippet(first.innerText || '')
+        .replace(/\s*,\s*(completed|currently playing|in progress|not started)\s*$/i, '').trim()
+    : '';
+  return { titles: lessons.map(({ title }) => title), openIndex, courseTitle };
+}
+
 async function extractDocument({
   keepImages = true,
   onlySignificantImages = true,
@@ -2403,6 +2494,10 @@ async function extractDocument({
   // mounts only some of its questions. Independent of `interactive`: it
   // clicks nothing, so it is not expansion.
   readFormPayload = true,
+  // Walk the page to trigger lazy loaders before reading. Worth ~400ms and
+  // always wanted for a single capture; a course walk turns it off, since it
+  // would repeat once per lesson on a shell that has already loaded.
+  materializeLazy = true,
   onProgress,
 } = {}) {
   const styles = new StyleManager();
@@ -2425,8 +2520,14 @@ async function extractDocument({
     // opening accordions and tab panels the reader had closed — is Book-only.
     revealHiddenContent(styles, collectDocuments(), { expand: expandAll });
 
-    onProgress?.({ phase: 'lazy' });
-    await materializeLazyContent(styles, { onProgress: (p) => onProgress?.({ phase: 'lazy', progress: p }) });
+    // Skippable during a course walk: the scroll pass exists to trigger lazy
+    // loaders, and re-running it for all forty lessons of one course costs
+    // ~430ms each for content the shell has usually already fetched. A single
+    // page capture always does it.
+    if (materializeLazy) {
+      onProgress?.({ phase: 'lazy' });
+      await materializeLazyContent(styles, { onProgress: (p) => onProgress?.({ phase: 'lazy', progress: p }) });
+    }
 
     // Re-run: lazily inserted subtrees arrive hidden too.
     revealHiddenContent(styles, collectDocuments(), { expand: expandAll });
@@ -2978,4 +3079,12 @@ function estimateReadingTime(wordCount) {
   window.__clearCopyToMarkdown = (content) =>
     toMarkdown(htmlToBlocks(content.html), content.metadata);
   window.__clearCopyDiscoverLessonLinks = () => discoverCourseLessonLinks();
+  // Whole-course walk over an ARIA lesson tree. Returns the per-lesson
+  // results; the caller merges them, since collection.js is not bundled here
+  // (it runs in the preview, under the extension's own CSP).
+  // Walking is driven one lesson per call: forty pages of extracted HTML is
+  // far more than executeScript can return in a single structured clone.
+  window.__clearCopyLessonTree = () => lessonTreeSummary();
+  window.__clearCopyOpenLesson = (index, options) => openLessonByIndex(index, options || {});
+  window.__clearCopyFindLessonTree = () => lessonTreeSummary().titles;
 })();

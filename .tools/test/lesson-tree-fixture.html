@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Lesson 1 (1/4) - Design Use Cases | Course</title>
+</head>
+<body>
+
+<!-- Reproduces a Sana-style course shell (confirmed against a live
+     openai-partneru.sana.ai program). Two things make this shape unreachable
+     for discoverCourseLessonLinks as it stands:
+
+       1. The left menu is an ARIA tree — role="tree" with role="treeitem"
+          children — and carries NO <a href> at all. The anchor-based walk
+          finds nothing, because there is nothing to find.
+       2. Lessons load by client-side routing: clicking a treeitem swaps the
+          body content and pushState's a new URL. The document is never
+          unloaded, so there is no beforeunload and no Chrome "changes you
+          made may not be saved" prompt — the exact wall that killed the old
+          collectWholeCourse on SCORM players.
+
+     Group rows (role="treeitem" that CONTAIN another treeitem) are section
+     headings, not lessons: walking them would capture the same page twice.
+     Only leaves are lessons.
+
+     "Exit course" carries lesson-shaped markup on purpose: TAB_UNSAFE must
+     still bar it, or a whole-course walk can end the learner's enrollment. -->
+<div class="shell">
+  <div role="tree" aria-label="Course contents">
+    <div role="treeitem" class="group">
+      <span class="group-label">Module one</span>
+      <div role="treeitem" data-lesson="l1">Introduction , completed</div>
+      <div role="treeitem" data-lesson="l2">What you'll learn , completed</div>
+    </div>
+    <div role="treeitem" class="group">
+      <span class="group-label">Module two</span>
+      <div role="treeitem" data-lesson="l3">Assess use-case quality , currently playing</div>
+      <div role="treeitem" data-lesson="l4">Summary</div>
+    </div>
+    <div role="treeitem" data-lesson="exit">Save and exit course</div>
+  </div>
+
+  <main id="stage">
+    <h1>Introduction</h1>
+    <p>The opening lesson explains how activation-ready use cases are designed and reviewed across a partner engagement.</p>
+  </main>
+</div>
+
+<script>
+  // Client-side routing, as the real player does: swap content, push a URL,
+  // never reload. No beforeunload is registered anywhere on purpose.
+  var LESSONS = {
+    l1: { t: 'Introduction',
+          h: '<h1>Introduction</h1><p>The opening lesson explains how activation-ready use cases are designed and reviewed across a partner engagement.</p>' },
+    l2: { t: "What you'll learn",
+          h: "<h1>What you'll learn</h1><p>You will learn to evaluate business value and activation readiness before committing engineering effort to a workflow.</p>" },
+    l3: { t: 'Assess use-case quality',
+          h: '<h1>Assess use-case quality</h1><p>Quality is judged on measurable outcomes, data availability, and whether the workflow survives contact with real customer volume.</p>' },
+    l4: { t: 'Summary',
+          h: '<h1>Summary</h1><p>Recap of the activation framework and the checklist you will reuse on the next customer engagement you scope.</p>' },
+    exit: { t: 'Exit', h: '<h1>You have left the course</h1><p>Enrollment ended.</p>' }
+  };
+  document.querySelectorAll('[role="treeitem"][data-lesson]').forEach(function (item) {
+    item.addEventListener('click', function () {
+      var key = item.getAttribute('data-lesson');
+      var lesson = LESSONS[key];
+      if (!lesson) return;
+      document.getElementById('stage').innerHTML = lesson.h;
+      document.title = lesson.t + ' | Course';
+      history.pushState({}, '', '/lesson/' + key);
+      document.querySelectorAll('[role="treeitem"]').forEach(function (n) {
+        n.textContent = n.textContent.replace(/ , currently playing/, '');
+      });
+    });
+  });
+</script>
+
+</body>
+</html>

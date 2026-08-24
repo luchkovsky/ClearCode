@@ -37,6 +37,7 @@ const state = {
   collectionSize: 0,
   zoom: 1,
   autoFit: true,
+  hasLessonTree: false,  // a course menu the whole-course walk could follow
 };
 
 // ---------------------------------------------------------------------------
@@ -103,17 +104,143 @@ async function loadFromCollection() {
   });
 }
 
+// Walk every lesson in a course's left-hand tree and merge them into one book.
+//
+// Top frame only, deliberately: the lesson tree is the player's own navigation
+// and lives in the host page, while `readPageFromTab` fans out to every frame
+// because the *content* may be elsewhere. Each lesson's extraction still goes
+// through the normal all-frames path once the walk has navigated to it.
+//
+// This is the whole-course capture that was removed once before. It is safe to
+// bring back only for tree-shaped menus that route client-side: the walk stops
+// the moment a navigation actually unloads the page, which is the condition
+// that made the old version demand a manual click per lesson.
+async function walkCourseFromSourceTab(onStep) {
+  const tabId = state.sourceTabId;
+  if (!Number.isFinite(tabId)) {
+    throw new Error('No page to read. Open Clear Copy from the course you want to export.');
+  }
+
+  const inject = () => chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: ['src/extractor.bundle.js'],
+  }).catch(() => {});
+
+  await inject();
+
+  const run = async (func, args = []) => {
+    const [res] = await chrome.scripting.executeScript({ target: { tabId }, args, func });
+    return res?.result;
+  };
+
+  const summary = await run(() => (window.__clearCopyLessonTree
+    ? window.__clearCopyLessonTree() : null));
+  if (!summary || !summary.titles?.length) {
+    throw new Error('No course menu found on this page. Whole-course capture needs a lesson list in the sidebar.');
+  }
+
+  const { titles, openIndex, courseTitle } = summary;
+  const options = {
+    keepImages: state.options.keepImages,
+    onlySignificantImages: state.options.onlySignificantImages,
+    keepInteractionPrompts: state.options.keepInteractionPrompts,
+    readFormPayload: state.options.readFormPayload,
+    interactive: 'current',
+    // The course shell stays loaded between lessons, so the lazy-scroll pass
+    // would repeat forty times for content already fetched.
+    materializeLazy: false,
+  };
+
+  const pages = [];
+  const visited = [];
+  let unloaded = false;
+
+  for (let i = 0; i < titles.length; i++) {
+    onStep?.(i, titles.length, titles[i]);
+
+    const opened = await run(
+      (idx) => (window.__clearCopyOpenLesson ? window.__clearCopyOpenLesson(idx) : null), [i]);
+    if (!opened?.ok) {
+      // A page that genuinely unloaded means this course is not client-side
+      // routed; stop rather than fight the browser's unsaved-changes prompt.
+      if (opened?.unloaded || opened?.reason === 'unloaded') { unloaded = true; break; }
+      continue;
+    }
+
+    // Client-side routing does not tear down the top frame, so the bundle
+    // normally survives from lesson to lesson. Re-injecting 126 KB into every
+    // frame on every lesson was costing more than the extraction itself, so
+    // do it only when the entry point has actually gone (a real navigation, or
+    // a player frame that was replaced).
+    const alive = await run(() => typeof window.__clearCopyExtract === 'function');
+    if (!alive) await inject();
+    let content;
+    try {
+      content = await readPageFromTab(tabId, options, { skipInject: true });
+    } catch {
+      continue;
+    }
+    if (!content || !(content.text || '').trim()) continue;
+
+    // The menu label wins: a lesson page often has no heading of its own (a
+    // Summary reads "Untitled"), and the sidebar label is what the contents
+    // page must list.
+    pages.push({ ...content, title: titles[i] || content.metadata?.title || 'Lesson', order: i });
+    visited.push(titles[i]);
+  }
+
+  // Put the reader back on the lesson they had open.
+  let restored = false;
+  if (openIndex >= 0) {
+    const back = await run(
+      (idx) => (window.__clearCopyOpenLesson ? window.__clearCopyOpenLesson(idx) : null), [openIndex]);
+    restored = !!back?.ok;
+  }
+
+  if (!pages.length) throw new Error('The course walk produced nothing to export.');
+  if (unloaded) {
+    status(`Stopped after ${pages.length} lessons — this course reloads the page between lessons.`, 6000);
+  }
+
+  return { pages, visited, restored, unloaded, courseTitle };
+}
+
+// How many lessons a whole-course walk would visit, so the confirmation can
+// name a real number instead of asking for a blank cheque.
+async function countCourseLessons() {
+  const tabId = state.sourceTabId;
+  if (!Number.isFinite(tabId)) return 0;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId }, files: ['src/extractor.bundle.js'],
+    }).catch(() => {});
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => (window.__clearCopyFindLessonTree ? window.__clearCopyFindLessonTree() : []),
+    });
+    return (res?.result || []).length;
+  } catch {
+    return 0;
+  }
+}
+
 // Reads whatever is currently loaded in tabId — one page, as it stands right now.
-async function readPageFromTab(tabId, options) {
+async function readPageFromTab(tabId, options, { skipInject = false } = {}) {
   // Inject into EVERY frame, not just the top one. Course players and embedded
   // readers host the real content on another domain, which the page itself
   // cannot read — but the extension can, by running inside that frame too.
-  await chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
-    files: ['src/extractor.bundle.js'],
-  }).catch(() => {
-    // A frame that refuses injection must not abort the others.
-  });
+  //
+  // `skipInject` is for a course walk, which has already checked that the
+  // bundle is live: pushing 126 KB into every frame once per lesson dominated
+  // the walk's runtime, and client-side routing leaves the frames intact.
+  if (!skipInject) {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ['src/extractor.bundle.js'],
+    }).catch(() => {
+      // A frame that refuses injection must not abort the others.
+    });
+  }
 
   let results = [];
   try {
@@ -597,6 +724,9 @@ async function syncSource() {
   // Only meaningful when a real tab is behind this preview.
   $('addCurrent').disabled = !state.sourceTabId;
   $('refreshBtn').disabled = state.isCollection || !state.sourceTabId;
+  // Whole-course capture is offered only where there is a course menu to walk,
+  // so it never appears on an ordinary article.
+  $('walkCourseBtn').hidden = state.isCollection || !state.hasLessonTree;
 }
 
 // Re-read the collection, then rebuild whatever is on screen.
@@ -771,6 +901,68 @@ function wireControls() {
     await boot();
   });
 
+  $('walkCourseBtn').addEventListener('click', async () => {
+    if (state.isCollection) return;
+    const btn = $('walkCourseBtn');
+
+    const count = await countCourseLessons();
+    if (!count) {
+      status('No course menu found on this page.', 4000);
+      return;
+    }
+
+    // Walking opens each lesson in the real course player, and a player that
+    // tracks progress will record them as viewed. That is a change to the
+    // learner's own training record, so it is never a side effect of picking a
+    // document type — it is asked for explicitly, with the count named.
+    const ok = confirm(
+      `Capture all ${count} lessons as one book?\n\n` +
+      'Clear Copy will open each lesson in turn to read it. Your course player ' +
+      'may record those lessons as viewed, and your progress may change.\n\n' +
+      'This can take a minute or so. You will be returned to the lesson you ' +
+      'have open now.');
+    if (!ok) return;
+
+    btn.disabled = true;
+    try {
+      setLoading(`Reading lesson 1 of ${count}…`);
+      const walked = await walkCourseFromSourceTab((i, total, title) => {
+        setLoading(`Reading lesson ${i + 1} of ${total}… ${title || ''}`.trim());
+      });
+
+      const book = mergeCollection(
+        walked.pages.map((page, i) => ({ ...page, order: page.order ?? i })),
+        {
+          style: state.options.style,
+          includeContents: true,
+          pageBreaks: true,
+          // The course name, not the first lesson's — pages[0] is usually an
+          // "Introduction" and titling the book after it reads as a mistake.
+          title: walked.courseTitle || document.title.replace(/ — Clear Copy$/, '') || 'Course',
+        });
+
+      // Present it as a collection: the same path the manual
+      // Source → Combined flow already renders and exports through.
+      state.isCollection = true;
+      state.content = book;
+      // The renderer paginates from state.blocks, not from state.content: a
+      // book assigned without re-deriving them re-renders the previous
+      // single-page document and looks exactly like the walk never ran.
+      state.blocks = htmlToBlocks(book.html);
+      state.collectionSize = walked.pages.length;
+      render();
+      status(`Captured ${walked.pages.length} of ${count} lessons.`, 5000);
+    } catch (err) {
+      // Never fail quietly here: a silent catch is what made a broken walk
+      // look like an ordinary one-page export.
+      console.error('[Clear Copy] course walk failed:', err);
+      status(`Course walk failed: ${err.message || err}`, 8000);
+    } finally {
+      btn.disabled = false;
+      clearLoading();
+    }
+  });
+
   $('savePdf').addEventListener('click', onSavePdf);
   $('saveMd').addEventListener('click', onSaveMarkdown);
   $('copyMd').addEventListener('click', onCopyMarkdown);
@@ -856,6 +1048,14 @@ async function boot() {
     state.content = content;
     state.blocks = htmlToBlocks(content.html);
     document.title = `${content.metadata.title} — Clear Copy`;
+
+    // Whether a course menu exists is a property of the live tab, not of the
+    // cached extraction, so it is re-checked on every boot — including the
+    // cached-content path and after the refresh button. Checked before
+    // render() so the control is visible on the first paint rather than a
+    // render late.
+    state.hasLessonTree = !useCollection && (await countCourseLessons()) > 1;
+
     render();
   } catch (err) {
     $('loading').innerHTML = `
