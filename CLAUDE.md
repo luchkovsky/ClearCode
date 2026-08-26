@@ -94,8 +94,9 @@ page ──▶ extract.js ──▶ { html, faithfulHtml, metadata, images }
 | `src/export.js` | Picks the engine per document type; CDP with print fallback. |
 | `src/collection.js` | Capture-as-you-browse store + merge into one document. |
 | `src/debug.js` | Buffered `debugLog` — see note below on why console.log alone isn't enough. |
+| `src/settings.js` | Extension-level preferences, distinct from per-export options in `render.js`. |
 | `background.js` | Service worker; the only place `chrome.debugger` is used. |
-| `preview.js` | Preview controller; extraction, live re-render, export. |
+| `preview.js` | Preview controller; extraction, live re-render, export, and the whole-course walk driver. |
 
 ### Document types → engines
 
@@ -104,34 +105,66 @@ The engine is chosen per document type — a deliberate design decision:
 | Type | Captures | Pagination | Engine |
 | --- | --- | --- | --- |
 | Article | the current page as it stands (`interactive: 'current'`) | none, one continuous page | CDP with a computed tall page |
-| Book | the current page with every tab/stepper/flashcard/accordion clicked through (`interactive: 'expand'`) | paper pages + running heads | CDP `Page.printToPDF` |
+| Book | the current page with every tab/stepper/flashcard/accordion clicked through (`interactive: 'expand'`), plus any form payload; optionally every lesson of a course | paper pages + running heads | CDP `Page.printToPDF` |
 
 **The document type decides what is captured, not just how it is laid out.**
 `extractDocument({ interactive })` gates `revealHiddenContent`'s expand-intent
 passes and `harvestInteractiveWidgets` (tabs, steppers, flashcards, generic
-accordions). Article is a snapshot of what's currently open; Book clicks
-through the rest of what's on the *same page*. Changing docType re-extracts
-rather than just re-rendering — see `breaksChanged` in preview.js.
+accordions), and the form-payload pass below. Article is a snapshot of what's
+currently open; Book clicks through the rest of what's on the *same page*.
+Changing docType re-extracts rather than just re-rendering — see
+`breaksChanged` in preview.js. Whole-course capture is *not* part of this
+gate: it is a separate, explicitly confirmed action, because it navigates the
+reader's real course.
 
-**Book briefly meant something much bigger — walking the whole course, not
-just one page — and that was deliberately reverted.** `discoverCourseLessonLinks`
-(`extract.js`) still exists and finds every same-origin lesson link in a
-page's own nav/sidebar (filtered through `TAB_UNSAFE`, extended with
-`save + exit/close/quit`, `unenroll`, `withdraw`, `end course/session/lesson`,
-and `NON_READING_PAGE` for quiz/lab/video links), and `clearCopyDebugNavLinks()`
-in `preview.js` still surfaces it as a dev tool. But actually navigating the
-tab through each lesson — tried as `collectWholeCourse` — hit a hard, real
-wall: LearnUpon's SCORM player registers a `beforeunload` handler on a live
-lesson session, so every single lesson-to-lesson transition triggered
-Chrome's native "changes you made may not be saved" prompt, requiring a
-manual click per lesson on every course. That defeats the point of automating
-it, so the navigation path was removed entirely rather than worked around
-(dismissing a browser safety prompt programmatically was rejected as
-overriding a safeguard the course player put there on purpose). If a
-whole-course capture is wanted again, the existing manual **Source → Combined**
-flow (`src/collection.js`, "Add current page" per lesson) is the mechanism
-that doesn't fight this prompt, because the reader — not the extension —
-drives each navigation.
+**Whole-course capture exists again, and the reason it was reverted still
+governs when it may run.** Walking a course lesson by lesson was tried once as
+`collectWholeCourse` and removed: LearnUpon's SCORM player registers a
+`beforeunload` handler on a live lesson session, so every lesson-to-lesson
+transition raised Chrome's native "changes you made may not be saved" prompt,
+one manual click per lesson. Dismissing a browser safety prompt
+programmatically was rejected then and is still rejected — it overrides a
+safeguard the course player put there on purpose.
+
+That wall is specific to a player that unloads the page. A course whose menu
+routes **client-side** never unloads the document, so the prompt cannot appear,
+and there is nothing to work around. `walkLessonTree`'s primitives
+(`findLessonTreeItems`, `openLessonByIndex`, `lessonTreeSummary` in
+`extract.js`) drive that case, and **`openLessonByIndex` aborts the moment a
+navigation actually unloads the page** — that guard is what keeps this from
+becoming the thing that was rejected. Do not remove it to "support more
+platforms".
+
+Three further constraints, each load-bearing:
+
+- **Only leaf `treeitem`s are lessons.** A group row contains other treeitems
+  and selecting it lands on its first child, capturing that lesson twice and
+  titling it after the section.
+- **`TAB_UNSAFE` still applies.** "Save and exit course" wears the same markup
+  as a lesson in the same tree; following it during a walk can end an
+  enrollment rather than merely navigating.
+- **The walk is driven one lesson per call from `preview.js`, not as one
+  in-page loop.** A course page's extracted HTML runs to hundreds of
+  kilobytes and both the Reader and Faithful trees are returned; forty of
+  those is ~14MB, far past what `chrome.scripting.executeScript` can
+  structured-clone in a single return. The call fails wholesale and the reader
+  silently gets an ordinary one-page export — which is exactly how this first
+  shipped. Keeping the loop in the caller also buys per-lesson progress and a
+  usable partial book when something fails part-way.
+
+It is offered as a **book icon in the preview's stage bar**, shown only when a
+lesson tree is detected, and asks for confirmation naming the lesson count:
+walking opens each lesson in the real player, and a player that tracks
+progress **will record them as viewed**. That is a change to the learner's own
+training record, so it is never a side effect of choosing a document type.
+
+`discoverCourseLessonLinks` still exists for `<a href>`-shaped menus and is
+surfaced by `clearCopyDebugNavLinks()`. It finds nothing on a tree-shaped menu
+(Sana's sidebar carries two anchors on a 40-lesson course), which is why the
+tree walk is a separate detector rather than an extension of it. The manual
+**Source → Combined** flow (`src/collection.js`) remains the answer for any
+platform that does unload between lessons, because the reader — not the
+extension — drives each navigation.
 
 A ruled-paper "Notepad" engine existed briefly and was removed — it emulated
 physical note paper, which was never the goal. "Collecting notes into one
@@ -350,6 +383,48 @@ These solve real bugs; don't remove them without understanding why they exist.
   genuine large diagram (real `<text>`, or an `<image>`) still survives the
   same pass; `test/articulate-background-fixture.html` sabotage-tests both
   halves together.
+- **A fifth content shape: questions that live in a script payload, not the
+  DOM.** A virtualised form renderer (Typeform, confirmed against a live
+  apidays form) mounts a rolling window of ~3 questions and keeps the other 19
+  in the form definition it shipped to the browser. Unlike every widget shape
+  above, no reveal and no click reaches them — they are not in the DOM in any
+  form, hidden or otherwise. `findFormPayloadFields` locates the definition by
+  the *shape of the data* (an array whose entries carry a string `type` and a
+  string `title`, most long enough to be a question), never by hostname, and
+  `buildFormPayloadTree` renders it as prose. **Book only**: reading it clicks
+  nothing and submits nothing, but the questions the reader has not reached
+  are not "the page as it stands", so Article deliberately stops at what is
+  mounted. Gated by the `readFormPayload` setting. **`allow_other_choice` and
+  `none_of_the_above` are sibling flags, not members of `choices`** — reading
+  the array alone silently dropped a real option from 12 of 14 questions on
+  the real form.
+- **Answer options are content even though the markup is a control.** Form
+  renderers emit each choice as `<button role="checkbox">` holding the label,
+  and `STRIP_TAGS` removes every `<button>`, so a form exported as a question
+  with "Choose as many as you like" and nothing under it. They are *unwrapped*
+  into `<li>` before the strip runs — the reader wants the label, not a
+  control they cannot operate on paper. Gated on the checkbox/radio roles: a
+  plain `<button>Continue</button>` is still furniture and still stripped.
+- **`legend` is a content-root scoring tag.** A form page puts every question
+  title in a `<legend>` inside a `<fieldset>` and every option in a `<div>`,
+  so it can carry a whole document of real reading matter without a single
+  `<p>`, `<li>` or `<h1>`. Without `legend` such a page scored zero, elected
+  no root of its own, and lost the contest to whatever surrounding chrome
+  *did* use prose tags. Same failure as the `BODY` scoring-candidate bug, one
+  level down: the vocabulary the page actually uses was not on the list.
+- **A heading inside `aside`/`nav`/`footer` must not title the export.**
+  `contentHeading` took the first `h1, h2` in document order, so when scoring
+  falls back to `<body>` a help sidebar's `<h2>` named the whole document
+  ("Frequently asked questions about this survey"). Landmark chrome is also
+  stripped from the clean tree in that fallback case — scoped to
+  `clone.tagName === 'BODY'`, so a page whose content genuinely lives in
+  `<header>` or `<aside>` keeps it when that element was elected on merit.
+- **The empty-node sweep includes headings and rows.** An `<h2></h2>` prints
+  as a gap where a title should be and an emptied `<tr>` as a blank stripe
+  across the table. Emptiness is measured with `&nbsp;` folded to a plain
+  space, because `trim()` treats U+00A0 as content and CMS output is full of
+  it. Assert these on `html`, not `md`: the Markdown side already drops them,
+  so a Markdown assertion passes while testing nothing.
 - **Copy-protection is relaxed, not defeated.** `neutraliseCopyProtection`
   clears `user-select` locks, copy/selectstart handlers, and transparent
   overlays so already-visible DOM text extracts normally. It only hides
@@ -392,6 +467,14 @@ codebase permanently rather than stripped after each debugging session:
   one frame (or all) with `window.__clearCopyDebug = true` and a 20-second
   client-side timeout, printing each frame's buffered `debugLog`.
 
+`.tools/test/diagnose-walk.js` covers the one path none of the above reach:
+paste it into the **preview tab's** console (not the course page's) to report
+whether the bundle is injected and at which `API_VERSION`, whether the walk
+entry points exist, what the lesson tree returns, and whether one lesson can
+actually be opened. It exists because a stale bundle in an already-injected
+tab presents identically to a missing feature — the button simply never
+appears — and that is indistinguishable from the outside.
+
 ## Conventions
 
 - No build step, framework, or dependencies beyond Node for `.tools/build.js`
@@ -402,7 +485,19 @@ codebase permanently rather than stripped after each debugging session:
 ## Verified vs. unverified
 
 - **Verified**: extraction, Markdown fidelity, ad stripping, image filtering,
-  all three document types, both styles, and the preview UI end-to-end.
+  both document types, both styles, form-payload reading, and the lesson-tree
+  walk — all through `validate.js`, which drives the extractor over CDP.
+- **Not verified — and this is a real gap, not a formality**: anything that
+  only exists inside a loaded extension. `validate.js` reaches
+  `window.__clearCopy*` directly and never crosses the
+  `chrome.scripting.executeScript` boundary, so the preview's own wiring —
+  button visibility, option plumbing, the walk's per-lesson driver — is
+  covered by no test at all. Two bugs shipped green through this gap in one
+  session: a walk that returned ~14MB in a single `executeScript` result (the
+  call fails wholesale and the reader silently gets a one-page export), and a
+  redundant bundle re-injection that pushed 130KB into every frame per lesson.
+  A suite at 257/257 says nothing about that path. **Load the extension
+  unpacked and exercise the actual button before believing a UI change works.**
 - **Not verified**: the CDP export path against a live `chrome.debugger` attach —
   the extension would not load in an automated Chrome profile. Load it unpacked
   and click **Save PDF** once to confirm.
