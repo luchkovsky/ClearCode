@@ -1,5 +1,5 @@
 import { loadSettings, saveSettings, resetSettings, DEFAULT_SETTINGS } from './src/settings.js';
-import { loadCollection, clearCollection } from './src/collection.js';
+import { loadCollection, clearCollection, listCollectionSessions } from './src/collection.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -90,7 +90,12 @@ $('reset').addEventListener('click', async () => {
 // ---------------------------------------------------------------------------
 
 async function renderCollection() {
-  const items = await loadCollection();
+  // Collections are per capture session (one per page being collected from),
+  // so the options page — which is extension-wide — reports across all of
+  // them rather than showing whichever bucket happens to be the default.
+  const sessions = await listCollectionSessions();
+  const buckets = await Promise.all(sessions.map((s) => loadCollection(s.session)));
+  const items = buckets.flat();
   if (!items.length) {
     $('collectionSummary').textContent = 'Nothing collected yet.';
     $('clearCollection').disabled = true;
@@ -103,13 +108,16 @@ async function renderCollection() {
   const parts = [];
   if (pages) parts.push(`${pages} page${pages === 1 ? '' : 's'}`);
   if (selections) parts.push(`${selections} selection${selections === 1 ? '' : 's'}`);
+  if (sessions.length > 1) parts.push(`across ${sessions.length} pages`);
   $('collectionSummary').textContent =
     `${parts.join(' and ')} · ${words.toLocaleString()} words`;
   $('clearCollection').disabled = false;
 }
 
 $('clearCollection').addEventListener('click', async () => {
-  await clearCollection();
+  // Clears every session's collection: this is the extension-wide control.
+  const sessions = await listCollectionSessions();
+  await Promise.all(sessions.map((s) => clearCollection(s.session)));
   await renderCollection();
   status('Collection cleared');
 });

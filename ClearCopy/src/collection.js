@@ -2,7 +2,23 @@
 // document. Nothing navigates on its own — you stay in control of what is
 // captured and when.
 
-const KEY = 'clearcopy:collection';
+// One bucket per capture session, not one for the whole extension. Two
+// previews open on two different courses were writing to the same array, so
+// the reader got a single interleaved document instead of two books.
+//
+// The session id travels in the preview's own URL, so each window keeps its
+// own result while *settings* (which are preferences, not results) stay
+// global and shared — see settings.js.
+const KEY_PREFIX = 'clearcopy:collection';
+const DEFAULT_SESSION = 'default';
+
+// The legacy single-bucket key. Still read on first use of a session so a
+// collection in progress when this shipped is adopted rather than lost.
+const LEGACY_KEY = 'clearcopy:collection';
+
+const keyFor = (session) =>
+  (!session || session === DEFAULT_SESSION) ? LEGACY_KEY : `${KEY_PREFIX}:${session}`;
+
 const MAX_ITEMS = 60;
 
 // Extracted HTML can be large; keep the collection well inside the
@@ -11,18 +27,19 @@ const MAX_TOTAL_BYTES = 4 * 1024 * 1024;
 
 const byteLength = (value) => new Blob([JSON.stringify(value)]).size;
 
-export async function loadCollection() {
+export async function loadCollection(session) {
   try {
-    const stored = await chrome.storage.local.get(KEY);
-    const items = stored[KEY];
+    const key = keyFor(session);
+    const stored = await chrome.storage.local.get(key);
+    const items = stored[key];
     return Array.isArray(items) ? items : [];
   } catch {
     return [];
   }
 }
 
-async function save(items) {
-  await chrome.storage.local.set({ [KEY]: items });
+async function save(items, session) {
+  await chrome.storage.local.set({ [keyFor(session)]: items });
 }
 
 // Pages are identified by URL so re-visiting a lesson updates it in place
@@ -30,8 +47,8 @@ async function save(items) {
 //
 // Selections are the exception: several excerpts from one page are all valid
 // and must not overwrite each other, so each gets a unique key.
-export async function addToCollection(content) {
-  const items = await loadCollection();
+export async function addToCollection(content, session) {
+  const items = await loadCollection(session);
   const pageUrl = content.metadata?.url || '';
   const isSelection = !!content.isSelection;
   const url = isSelection
@@ -69,28 +86,55 @@ export async function addToCollection(content) {
     trimmed = trimmed.slice(1);
   }
 
-  await save(trimmed);
+  await save(trimmed, session);
   return { count: trimmed.length, replaced: existing >= 0, trimmed: trimmed.length < items.length };
 }
 
-export async function removeFromCollection(url) {
-  const items = (await loadCollection()).filter((item) => item.url !== url);
-  await save(items);
+export async function removeFromCollection(url, session) {
+  const items = (await loadCollection(session)).filter((item) => item.url !== url);
+  await save(items, session);
   return items.length;
 }
 
-export async function clearCollection() {
-  await chrome.storage.local.remove(KEY);
+export async function clearCollection(session) {
+  await chrome.storage.local.remove(keyFor(session));
 }
 
-export async function reorderCollection(urls) {
-  const items = await loadCollection();
+// Every session bucket currently in storage, so the options page can show and
+// clear collections that belong to windows the reader has since closed.
+export async function listCollectionSessions() {
+  try {
+    const all = await chrome.storage.local.get(null);
+    return Object.keys(all)
+      .filter((k) => k === LEGACY_KEY || k.startsWith(`${KEY_PREFIX}:`))
+      .map((k) => ({
+        session: k === LEGACY_KEY ? DEFAULT_SESSION : k.slice(KEY_PREFIX.length + 1),
+        count: Array.isArray(all[k]) ? all[k].length : 0,
+      }))
+      .filter((entry) => entry.count > 0);
+  } catch {
+    return [];
+  }
+}
+
+// Drop buckets belonging to sessions that are no longer open, so a reader who
+// opens many previews does not accumulate collections forever.
+export async function pruneCollectionSessions(liveSessions) {
+  const live = new Set([DEFAULT_SESSION, ...liveSessions]);
+  const sessions = await listCollectionSessions();
+  const dead = sessions.filter((s) => !live.has(s.session));
+  await Promise.all(dead.map((s) => chrome.storage.local.remove(keyFor(s.session))));
+  return dead.length;
+}
+
+export async function reorderCollection(urls, session) {
+  const items = await loadCollection(session);
   const byUrl = new Map(items.map((item) => [item.url, item]));
   const ordered = urls.map((u) => byUrl.get(u)).filter(Boolean);
   // Anything not named keeps its relative position at the end.
   items.forEach((item) => { if (!urls.includes(item.url)) ordered.push(item); });
   ordered.forEach((item, i) => { item.order = i; });
-  await save(ordered);
+  await save(ordered, session);
   return ordered;
 }
 

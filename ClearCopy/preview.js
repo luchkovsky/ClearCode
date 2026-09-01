@@ -37,6 +37,7 @@ const state = {
   collectionSize: 0,
   zoom: 1,
   autoFit: true,
+  session: 'default',   // which collection bucket this window reads and writes
   hasLessonTree: false,  // a course menu the whole-course walk could follow
 };
 
@@ -93,7 +94,7 @@ function clearLoading() {
 
 async function loadFromCollection() {
   setLoading('Merging collected pages…');
-  const items = await loadCollection();
+  const items = await loadCollection(state.session);
   if (!items.length) {
     throw new Error('Your collection is empty. Use “Add this page” on each lesson first.');
   }
@@ -680,7 +681,7 @@ function syncImageHint() {
 
 // The collected-pages list and the This page / Combined toggle.
 async function syncSource() {
-  const items = await loadCollection();
+  const items = await loadCollection(state.session);
   state.collection = items;
   const count = items.length;
 
@@ -713,8 +714,8 @@ async function syncSource() {
 
   $('collectedList').querySelectorAll('.remove').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      await removeFromCollection(btn.dataset.url);
-      const left = (await loadCollection()).length;
+      await removeFromCollection(btn.dataset.url, state.session);
+      const left = (await loadCollection(state.session)).length;
       // Fall back to single-page when the collection empties out.
       if (!left) state.source = 'page';
       await refreshSource();
@@ -825,7 +826,7 @@ function wireControls() {
       // Always capture fresh: the page may have changed since the preview opened.
       const content = await extractFromSourceTab();
       state.pageContent = content;
-      const { replaced } = await addToCollection(content);
+      const { replaced } = await addToCollection(content, state.session);
       status(replaced ? 'Updated in collection' : 'Added to collection');
       await syncSource();
       if (state.isCollection) await boot(); // merged view must include it now
@@ -835,7 +836,7 @@ function wireControls() {
   });
 
   $('clearCollected').addEventListener('click', async () => {
-    await clearCollection();
+    await clearCollection(state.session);
     state.source = 'page';
     await refreshSource();
     status('Collection cleared');
@@ -1074,6 +1075,15 @@ async function boot() {
   const params = new URLSearchParams(location.search);
   const tabId = Number(params.get('tab'));
   if (Number.isFinite(tabId)) state.sourceTabId = tabId;
+
+  // Results are kept per capture session so two previews open on two
+  // different courses do not write into one interleaved document. The source
+  // tab identifies the session: reopening the preview for the same page finds
+  // the collection it was already building, while a second page gets its own.
+  // Settings are deliberately NOT scoped this way — those are preferences,
+  // and the reader expects them shared.
+  state.session = params.get('session')
+    || (Number.isFinite(tabId) ? `tab-${tabId}` : 'default');
   // Opened straight from "Export all as one document".
   if (params.get('source') === 'collection') state.source = 'collection';
 

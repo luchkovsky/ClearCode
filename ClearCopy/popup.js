@@ -1,5 +1,10 @@
 import { loadCollection, addToCollection, removeFromCollection, clearCollection } from './src/collection.js';
 
+// The popup always acts on the tab it was opened over, so that tab names the
+// collection bucket — the same one its preview reads. Keeps two pages'
+// captures apart without the reader having to think about sessions.
+const sessionForTab = (tab) => (tab && Number.isFinite(tab.id) ? `tab-${tab.id}` : 'default');
+
 const RESTRICTED = /^(chrome|edge|about|chrome-extension|devtools|view-source):|^https:\/\/chromewebstore\.google\.com|^https:\/\/chrome\.google\.com\/webstore/;
 
 const $ = (id) => document.getElementById(id);
@@ -66,8 +71,10 @@ async function extract(tabId, options = {}) {
 // Collection
 // ---------------------------------------------------------------------------
 
+let popupSession = 'default';
+
 async function renderCollection() {
-  const items = await loadCollection();
+  const items = await loadCollection(popupSession);
   const panel = $('collection');
 
   if (!items.length) {
@@ -95,8 +102,16 @@ async function renderCollection() {
 
   $('collectionList').querySelectorAll('.remove').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      await removeFromCollection(btn.dataset.url);
-      renderCollection();
+      await removeFromCollection(btn.dataset.url, popupSession);
+      // Bind the popup to the tab it was opened over before drawing anything, so
+// the collection it shows is that page's, not another window's.
+(async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    popupSession = sessionForTab(tab);
+  } catch {}
+  await renderCollection();
+})();
       status('Removed');
     });
   });
@@ -109,7 +124,7 @@ $('addToCollection').addEventListener('click', async () => {
   status('Reading page…');
   try {
     const content = await extract(tab.id);
-    const { replaced } = await addToCollection(content);
+    const { replaced } = await addToCollection(content, popupSession);
     await renderCollection();
     status(replaced ? 'Updated in collection' : 'Added to collection');
   } catch (err) {
@@ -144,7 +159,7 @@ $('addSelection').addEventListener('click', async () => {
       return;
     }
 
-    await addToCollection(captured);
+    await addToCollection(captured, popupSession);
     await renderCollection();
     status(`Added ${captured.wordCount} words`);
   } catch (err) {
@@ -158,7 +173,7 @@ $('openOptions').addEventListener('click', () => {
 });
 
 $('clearCollection').addEventListener('click', async () => {
-  await clearCollection();
+  await clearCollection(popupSession);
   await renderCollection();
   status('Collection cleared');
 });
@@ -166,7 +181,8 @@ $('clearCollection').addEventListener('click', async () => {
 $('exportCollection').addEventListener('click', async () => {
   const tab = await activeTab();
   await chrome.tabs.create({
-    url: chrome.runtime.getURL(`preview.html?source=collection`),
+    url: chrome.runtime.getURL(
+      `preview.html?source=collection&session=${encodeURIComponent(popupSession)}`),
     index: (tab?.index ?? 0) + 1,
   });
   window.close();

@@ -162,6 +162,21 @@ async function flashBadge(text, colour) {
   } catch {}
 }
 
+// A collection bucket is keyed to the tab it was captured from, so buckets
+// outlive their tabs when a window is closed mid-collection. Prune on startup
+// rather than on tab close: closing a tab and reopening the preview for the
+// same page is a normal thing to do within one browser session, and dropping
+// the collection out from under that would lose real work.
+async function pruneDeadSessions() {
+  try {
+    const { pruneCollectionSessions } = await import('./src/collection.js');
+    const tabs = await chrome.tabs.query({});
+    await pruneCollectionSessions(tabs.map((t) => `tab-${t.id}`));
+  } catch {}
+}
+
+chrome.runtime.onStartup?.addListener(pruneDeadSessions);
+
 async function captureFromTab(tab, { selectionOnly = false } = {}) {
   if (!tab?.id) return { ok: false, error: 'No active tab.' };
   if (RESTRICTED.test(tab.url || '')) return { ok: false, error: 'Not a normal web page.' };
@@ -196,7 +211,9 @@ async function captureFromTab(tab, { selectionOnly = false } = {}) {
     };
   }
 
-  const { count } = await addToCollection(captured);
+  // Capture into the bucket belonging to the tab it came from, so a shortcut
+  // pressed on one course does not land in another course's collection.
+  const { count } = await addToCollection(captured, `tab-${tab.id}`);
   return { ok: true, count, title: captured.metadata?.title, selection: selectionOnly };
 }
 
@@ -212,7 +229,9 @@ async function runCapture(tab, opts) {
     if (settings.notifyOnCapture) await flashBadge(String(result.count), '#2a9d5c');
     if (settings.openPreviewAfterAdd) {
       chrome.tabs.create({
-        url: chrome.runtime.getURL('preview.html?source=collection'),
+        // Carry the capturing tab's session, or this opens the wrong bucket.
+        url: chrome.runtime.getURL(
+          `preview.html?source=collection&session=tab-${tab?.id ?? 'default'}`),
         index: (tab?.index ?? 0) + 1,
       });
     }
